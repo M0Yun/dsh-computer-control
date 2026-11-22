@@ -532,7 +532,8 @@ namespace ComputerControl
 
         private readonly Label _status;
         private readonly Label _stop;
-        private readonly Label _lock;
+        private readonly LockGlyph _lock;
+        private readonly Label _close;
         private readonly System.Windows.Forms.Timer _hideTimer;
         private readonly System.Windows.Forms.Timer _previewTimer;
         private bool _locked;
@@ -544,6 +545,7 @@ namespace ComputerControl
         private int _customX;
         private int _customY;
         private bool _dragging;
+        private bool _moved;
         private Point _dragStart;
         private Point _windowStart;
 
@@ -561,16 +563,23 @@ namespace ComputerControl
 
             _status = MakeText("待机", Color.White, ContentAlignment.MiddleLeft);
             _stop = MakeText("停止", Color.FromArgb(255, 128, 128), ContentAlignment.MiddleCenter);
-            _lock = MakeText("锁", Color.FromArgb(180, 190, 210), ContentAlignment.MiddleCenter);
+            _lock = new LockGlyph();
+            Controls.Add(_lock);
+            _close = MakeText("×", Color.FromArgb(170, 180, 195), ContentAlignment.MiddleCenter);
+            _close.Font = new Font("Segoe UI", 12f, FontStyle.Bold);
+            _close.Cursor = Cursors.Hand;
 
             _stop.Cursor = Cursors.Hand;
             _stop.Click += delegate { Overlay.Raise("overlay.stop"); };
-            _lock.Cursor = Cursors.Hand;
             _lock.Click += delegate { ToggleLock(); };
+            _close.Click += delegate { Overlay.Raise("overlay.close"); };
 
             _status.MouseDown += DragDown;
             _status.MouseMove += DragMove;
             _status.MouseUp += DragUp;
+            _lock.MouseDown += DragDown;
+            _lock.MouseMove += DragMove;
+            _lock.MouseUp += DragUp;
             MouseDown += DragDown;
             MouseMove += DragMove;
             MouseUp += DragUp;
@@ -654,9 +663,10 @@ namespace ComputerControl
 
         private void ApplyLayout()
         {
-            _stop.Bounds = new Rectangle(Width - 104, 4, 50, 38);
-            _lock.Bounds = new Rectangle(Width - 52, 4, 44, 38);
-            _status.Bounds = new Rectangle(34, 0, Width - 148, Height);
+            _close.Bounds = new Rectangle(Width - 34, 4, 26, 38);
+            _lock.Bounds = new Rectangle(Width - 66, 4, 30, 38);
+            _stop.Bounds = new Rectangle(Width - 118, 4, 50, 38);
+            _status.Bounds = new Rectangle(34, 0, Width - 152, Height);
         }
 
         protected override void OnPaint(PaintEventArgs e)
@@ -670,7 +680,7 @@ namespace ComputerControl
             using (SolidBrush brush = new SolidBrush(dot))
                 e.Graphics.FillEllipse(brush, 14, Height / 2 - 5, 10, 10);
             using (Pen pen = new Pen(Color.FromArgb(70, 255, 255, 255)))
-                e.Graphics.DrawLine(pen, Width - 112, 10, Width - 112, Height - 10);
+                e.Graphics.DrawLine(pen, Width - 124, 10, Width - 124, Height - 10);
         }
 
         public void Configure(bool enabled, string position, int x, int y, bool locked)
@@ -680,7 +690,7 @@ namespace ComputerControl
             _customX = x;
             _customY = y;
             _locked = locked;
-            _lock.Text = _locked ? "解锁" : "锁";
+            _lock.Locked = _locked;
             _lock.Cursor = _locked ? Cursors.Default : Cursors.Hand;
             if (!_enabled)
             {
@@ -749,7 +759,7 @@ namespace ComputerControl
         private void ToggleLock()
         {
             _locked = !_locked;
-            _lock.Text = _locked ? "解锁" : "锁";
+            _lock.Locked = _locked;
             _lock.Cursor = _locked ? Cursors.Default : Cursors.Hand;
             Dictionary<string, object> data = new Dictionary<string, object>();
             data["locked"] = _locked;
@@ -760,6 +770,7 @@ namespace ComputerControl
         {
             if (_locked || e.Button != MouseButtons.Left) return;
             _dragging = true;
+            _moved = false;
             _dragStart = Cursor.Position;
             _windowStart = Location;
         }
@@ -768,13 +779,20 @@ namespace ComputerControl
         {
             if (!_dragging || _locked) return;
             Point now = Cursor.Position;
-            Location = new Point(_windowStart.X + (now.X - _dragStart.X), _windowStart.Y + (now.Y - _dragStart.Y));
+            int dx = now.X - _dragStart.X;
+            int dy = now.Y - _dragStart.Y;
+            if (Math.Abs(dx) > 3 || Math.Abs(dy) > 3) _moved = true;
+            if (!_moved) return;
+            Location = new Point(_windowStart.X + dx, _windowStart.Y + dy);
         }
 
         private void DragUp(object sender, MouseEventArgs e)
         {
             if (!_dragging) return;
             _dragging = false;
+            // 只是点了一下锁/状态文字，不算拖动，不保存位置
+            if (!_moved) return;
+            _moved = false;
             _position = "custom";
             _customX = Left;
             _customY = Top;
@@ -794,6 +812,50 @@ namespace ComputerControl
             path.AddArc(0, size.Height - d, d, d, 90, 90);
             path.CloseFigure();
             return new Region(path);
+        }
+    }
+
+    /// <summary>锁按钮：直接画图标，关闭时是开锁，锁定后是关锁。</summary>
+    internal sealed class LockGlyph : Label
+    {
+        private bool _locked;
+
+        public LockGlyph()
+        {
+            BackColor = Color.Transparent;
+            Cursor = Cursors.Hand;
+            Text = "";
+        }
+
+        public bool Locked
+        {
+            get { return _locked; }
+            set { _locked = value; Invalidate(); }
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            Color color = _locked ? Color.FromArgb(205, 214, 228) : Color.FromArgb(110, 160, 255);
+            using (Pen pen = new Pen(color, 1.8f))
+            using (SolidBrush brush = new SolidBrush(color))
+            {
+                int cx = Width / 2;
+                int cy = Height / 2;
+                Rectangle body = new Rectangle(cx - 6, cy - 1, 12, 9);
+                if (_locked)
+                {
+                    e.Graphics.DrawArc(pen, cx - 5, cy - 9, 10, 12, 180, 180);
+                }
+                else
+                {
+                    // 开锁：锁梁抬起来偏左，留个缺口
+                    e.Graphics.DrawArc(pen, cx - 8, cy - 10, 10, 12, 180, 120);
+                }
+                e.Graphics.FillRectangle(brush, body);
+                e.Graphics.DrawRectangle(pen, body);
+            }
         }
     }
 
