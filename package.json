@@ -1,0 +1,45 @@
+{
+  "name": "dsh-computer-control",
+  "version": "0.1.0",
+  "description": "computer control —— 控制电脑（点得准、看得见、验得出来）与观看学习（盯屏幕、记操作、沉淀技能）两种状态，可主动切换。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "helper",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "windows",
+    "screen",
+    "learn"
+  ],
+  "engines": {
+    "node": ">=22.5",
+    "dsh": ">=0.2.0"
+  },
+  "author": "M1zuyn",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/M0Yun/dsh-computer-control.git"
+  },
+  "bugs": {
+    "url": "https://github.com/M0Yun/dsh-computer-control/issues"
+  },
+  "homepage": "https://github.com/M0Yun/dsh-computer-control#readme",
+  "license": "MIT"
+}

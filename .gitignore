@@ -1,0 +1,16 @@
+# 运行时编译产物，不提交
+helper/CCHelper.exe
+helper/*.pdb
+
+# 测试与临时数据
+.test/
+.testdata/
+.testdata*/
+docs/
+tmp/
+*.log
+
+# 系统
+.DS_Store
+Thumbs.db
+node_modules/
