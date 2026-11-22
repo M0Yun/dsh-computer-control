@@ -1,6 +1,6 @@
 {
   "name": "dsh-computer-control",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "computer control —— 控制电脑（点得准、看得见、验得出来）与观看学习（盯屏幕、记操作、沉淀技能）两种状态，可主动切换。",
   "type": "module",
   "main": "lib/index.js",

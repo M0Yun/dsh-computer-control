@@ -531,11 +531,13 @@ namespace ComputerControl
         private static extern bool SetWindowDisplayAffinity(IntPtr hwnd, uint affinity);
 
         private readonly Label _status;
+        private readonly Label _focus;
         private readonly Label _stop;
         private readonly LockGlyph _lock;
         private readonly Label _close;
         private readonly System.Windows.Forms.Timer _hideTimer;
         private readonly System.Windows.Forms.Timer _previewTimer;
+        private readonly System.Windows.Forms.Timer _focusTimer;
         private bool _locked;
         private bool _enabled = true;
         private string _mode = "idle";
@@ -556,12 +558,17 @@ namespace ComputerControl
             ShowInTaskbar = false;
             TopMost = true;
             StartPosition = FormStartPosition.Manual;
-            Size = new Size(380, 46);
+            Size = new Size(460, 62);
             BackColor = Color.FromArgb(20, 22, 26);
             DoubleBuffered = true;
             Font = new Font("Microsoft YaHei UI", 9f);
 
             _status = MakeText("待机", Color.White, ContentAlignment.MiddleLeft);
+            _status.Font = new Font("Microsoft YaHei UI", 9.5f, FontStyle.Bold);
+            _status.AutoEllipsis = true;
+            _focus = MakeText("", Color.FromArgb(175, 185, 200), ContentAlignment.MiddleLeft);
+            _focus.Font = new Font("Microsoft YaHei UI", 8.5f);
+            _focus.AutoEllipsis = true;
             _stop = MakeText("停止", Color.FromArgb(255, 128, 128), ContentAlignment.MiddleCenter);
             _lock = new LockGlyph();
             Controls.Add(_lock);
@@ -597,6 +604,11 @@ namespace ComputerControl
                 if (_mode == "idle") Hide();
                 else UpdateState(_mode, _label, _step, 2000);
             };
+
+            // 第二行实时显示当前聚焦窗口，每秒刷新
+            _focusTimer = new System.Windows.Forms.Timer();
+            _focusTimer.Interval = 1200;
+            _focusTimer.Tick += delegate { if (Visible) UpdateFocus(); };
 
             Region = RoundedRegion(Size, 23);
             ApplyLayout();
@@ -667,18 +679,20 @@ namespace ComputerControl
             {
                 // 锁定：藏掉 ×（不能关、不能拖），只留停止和锁
                 _close.Visible = false;
-                _lock.Bounds = new Rectangle(Width - 40, 4, 30, 38);
-                _stop.Bounds = new Rectangle(Width - 96, 4, 50, 38);
-                _status.Bounds = new Rectangle(34, 0, Width - 130, Height);
+                _lock.Bounds = new Rectangle(Width - 40, 12, 30, 38);
+                _stop.Bounds = new Rectangle(Width - 96, 12, 50, 38);
+                _status.Bounds = new Rectangle(34, 4, Width - 130, 28);
+                _focus.Bounds = new Rectangle(34, 30, Width - 130, 28);
                 _status.Cursor = Cursors.Default;
             }
             else
             {
                 _close.Visible = true;
-                _close.Bounds = new Rectangle(Width - 34, 4, 26, 38);
-                _lock.Bounds = new Rectangle(Width - 66, 4, 30, 38);
-                _stop.Bounds = new Rectangle(Width - 118, 4, 50, 38);
-                _status.Bounds = new Rectangle(34, 0, Width - 152, Height);
+                _close.Bounds = new Rectangle(Width - 34, 12, 26, 38);
+                _lock.Bounds = new Rectangle(Width - 66, 12, 30, 38);
+                _stop.Bounds = new Rectangle(Width - 118, 12, 50, 38);
+                _status.Bounds = new Rectangle(34, 4, Width - 152, 28);
+                _focus.Bounds = new Rectangle(34, 30, Width - 152, 28);
                 _status.Cursor = Cursors.SizeAll;
             }
         }
@@ -694,7 +708,7 @@ namespace ComputerControl
             using (SolidBrush brush = new SolidBrush(dot))
                 e.Graphics.FillEllipse(brush, 14, Height / 2 - 5, 10, 10);
             using (Pen pen = new Pen(Color.FromArgb(70, 255, 255, 255)))
-                e.Graphics.DrawLine(pen, Width - 124, 10, Width - 124, Height - 10);
+                e.Graphics.DrawLine(pen, Width - 124, 12, Width - 124, Height - 12);
         }
 
         public void Configure(bool enabled, string position, int x, int y, bool locked)
@@ -751,6 +765,8 @@ namespace ComputerControl
             _label = string.IsNullOrEmpty(label) ? "待机" : label;
             _step = step;
             _status.Text = _mode == "idle" ? _label : (_step > 0 ? _label + " · 第 " + _step + " 步" : _label);
+            if (_mode == "idle") _focus.Text = "";
+            else UpdateFocus();
             Invalidate();
             if (!_enabled) return;
             _hideTimer.Stop();
@@ -769,6 +785,40 @@ namespace ComputerControl
         {
             if (!Visible) Show();
             TopMost = true;
+        }
+
+        protected override void OnVisibleChanged(EventArgs e)
+        {
+            base.OnVisibleChanged(e);
+            if (Visible)
+            {
+                _focusTimer.Start();
+                UpdateFocus();
+            }
+            else
+            {
+                _focusTimer.Stop();
+            }
+        }
+
+        /** 第二行：当前聚焦窗口的标题和进程，太长就截断。 */
+        private void UpdateFocus()
+        {
+            try
+            {
+                IntPtr fg = Native.GetForegroundWindow();
+                string title = InputLog.WindowTitle(fg);
+                string exe = InputLog.ExeOf(fg);
+                string line = title;
+                if (!string.IsNullOrEmpty(exe)) line = string.IsNullOrEmpty(line) ? exe : line + "  (" + exe + ")";
+                if (string.IsNullOrEmpty(line)) line = "（没有聚焦窗口）";
+                if (line.Length > 34) line = line.Substring(0, 33) + "…";
+                _focus.Text = line;
+            }
+            catch
+            {
+                _focus.Text = "";
+            }
         }
 
         private void ToggleLock()
