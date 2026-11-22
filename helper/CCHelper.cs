@@ -49,6 +49,9 @@ namespace ComputerControl
         [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
         [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT p);
         [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT point);
+        [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr hWnd, uint flags);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr hWnd, StringBuilder text, int count);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
         [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr hWnd);
         [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
@@ -1358,6 +1361,7 @@ namespace ComputerControl
                 case "key": return Key(args);
                 case "type": return TypeText(args);
                 case "elements": return Elements(args);
+                case "probe": return Probe(args);
                 case "text": return WindowText(args);
                 case "windows": return Windows();
                 case "watch.start": return WatchStart(args);
@@ -1535,7 +1539,8 @@ namespace ComputerControl
                 }
 
                 Bitmap output = bmp;
-                bool resized = false;
+                bool ownsOutput = false;
+                double applied = 1.0;
                 if (maxWidth > 0 && bmp.Width > maxWidth)
                 {
                     double scale = (double)maxWidth / bmp.Width;
@@ -1548,19 +1553,42 @@ namespace ComputerControl
                         g2.DrawImage(bmp, 0, 0, maxWidth, nh);
                     }
                     output = small;
-                    resized = true;
+                    ownsOutput = true;
+                    applied = scale;
                 }
 
-                SaveJpeg(output, path, 80);
-                if (resized) output.Dispose();
+                // up：局部放大（1–4 倍），NearestNeighbor 保留像素边界，方便数像素/读小字
+                int up = Math.Max(1, Math.Min(4, Int(a, "up", 1)));
+                if (up > 1)
+                {
+                    int w2 = output.Width * up;
+                    int h2 = output.Height * up;
+                    Bitmap big = new Bitmap(w2, h2, PixelFormat.Format32bppArgb);
+                    using (Graphics g3 = Graphics.FromImage(big))
+                    {
+                        g3.InterpolationMode = InterpolationMode.NearestNeighbor;
+                        g3.PixelOffsetMode = PixelOffsetMode.Half;
+                        g3.DrawImage(output, 0, 0, w2, h2);
+                    }
+                    if (ownsOutput) output.Dispose();
+                    output = big;
+                    ownsOutput = true;
+                    applied = applied * up;
+                }
+
+                int outW = output.Width;
+                int outH = output.Height;
+                SaveJpeg(output, path, 82);
+                if (ownsOutput) output.Dispose();
 
                 Dictionary<string, object> res = new Dictionary<string, object>();
                 res["path"] = path;
-                res["width"] = resized ? maxWidth : origW;
-                res["height"] = resized ? (int)Math.Round(bmp.Height * ((double)maxWidth / origW)) : bmp.Height;
+                res["width"] = outW;
+                res["height"] = outH;
                 res["originX"] = region.X;
                 res["originY"] = region.Y;
-                res["scale"] = resized ? (double)maxWidth / origW : 1.0;
+                res["scale"] = applied;
+                res["up"] = up;
                 return res;
             }
         }
@@ -2096,6 +2124,69 @@ namespace ComputerControl
         }
 
         // ---------- UI Automation ----------
+
+        /** 查询某个屏幕坐标下面是什么窗口/什么元素，用来说明「点歪了没有」。 */
+        private object Probe(Dictionary<string, object> a)
+        {
+            int x = Int(a, "x", 0);
+            int y = Int(a, "y", 0);
+            Dictionary<string, object> res = new Dictionary<string, object>();
+            res["x"] = x;
+            res["y"] = y;
+
+            POINT pt = new POINT();
+            pt.X = x;
+            pt.Y = y;
+            IntPtr hwnd = Native.WindowFromPoint(pt);
+            IntPtr root = hwnd == IntPtr.Zero ? IntPtr.Zero : Native.GetAncestor(hwnd, 2);
+            if (root != IntPtr.Zero)
+            {
+                res["hwnd"] = root.ToInt64();
+                res["title"] = InputLog.WindowTitle(root);
+                res["exe"] = InputLog.ExeOf(root);
+                StringBuilder cls = new StringBuilder(256);
+                if (Native.GetClassName(root, cls, cls.Capacity) > 0) res["class"] = cls.ToString();
+            }
+            else
+            {
+                res["title"] = "";
+                res["exe"] = "";
+            }
+
+            Dictionary<string, object> element = null;
+            string error = null;
+            Thread worker = new Thread(delegate()
+            {
+                try
+                {
+                    AutomationElement el = AutomationElement.FromPoint(new System.Windows.Point(x, y));
+                    if (el == null) return;
+                    Dictionary<string, object> e = new Dictionary<string, object>();
+                    e["name"] = el.Current.Name;
+                    string type = "";
+                    try { type = el.Current.ControlType == null ? "" : el.Current.ControlType.ProgrammaticName.Replace("ControlType.", ""); }
+                    catch { }
+                    e["type"] = type;
+                    e["id"] = el.Current.AutomationId;
+                    e["class"] = el.Current.ClassName;
+                    e["enabled"] = el.Current.IsEnabled;
+                    System.Windows.Rect r = el.Current.BoundingRectangle;
+                    e["x"] = (int)Math.Round(r.X);
+                    e["y"] = (int)Math.Round(r.Y);
+                    e["w"] = (int)Math.Round(r.Width);
+                    e["h"] = (int)Math.Round(r.Height);
+                    element = e;
+                }
+                catch (Exception ex) { error = ex.Message; }
+            });
+            worker.IsBackground = true;
+            worker.SetApartmentState(ApartmentState.STA);
+            worker.Start();
+            worker.Join(2500);
+            if (element != null) res["element"] = element;
+            if (error != null) res["elementError"] = error;
+            return res;
+        }
 
         private object Elements(Dictionary<string, object> a)
         {
