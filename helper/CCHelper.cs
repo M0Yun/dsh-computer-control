@@ -522,10 +522,10 @@ namespace ComputerControl
             Run(delegate { if (_form != null) _form.Configure(enabled, position, x, y, locked, width, opacity); });
         }
 
-        public static void State(string mode, string label, string action, int delayHideMs)
+        public static void State(string mode, string label, string action, int delayHideMs, bool userPriority)
         {
             Ensure();
-            Run(delegate { if (_form != null) _form.UpdateState(mode, label, action, delayHideMs); });
+            Run(delegate { if (_form != null) _form.UpdateState(mode, label, action, delayHideMs, userPriority); });
         }
 
         public static void Preview(int durationMs)
@@ -588,6 +588,7 @@ namespace ComputerControl
         private string _mode = "idle";
         private string _label = "待机";
         private string _action = "";
+        private bool _userPriority = true;
         private string _position = "top-center";
         private int _customX;
         private int _customY;
@@ -684,7 +685,7 @@ namespace ComputerControl
                 _previewTimer.Stop();
                 SetCaptureVisible(false);
                 if (_mode == "idle") HideIsland(true);
-                else UpdateState(_mode, _label, _action, 2000);
+                else UpdateState(_mode, _label, _action, 2000, _userPriority);
             };
 
             // 第二行实时显示当前聚焦窗口，每秒刷新
@@ -866,14 +867,16 @@ namespace ComputerControl
             get { return _status.Text; }
         }
 
-        public void UpdateState(string mode, string label, string action, int delayHideMs)
+        public void UpdateState(string mode, string label, string action, int delayHideMs, bool userPriority)
         {
             _mode = string.IsNullOrEmpty(mode) ? "idle" : mode;
             _label = string.IsNullOrEmpty(label) ? "待机" : label;
             _action = action ?? "";
+            _userPriority = userPriority;
+            string tag = _userPriority ? "用户优先" : "可抢占";
             _status.Text = _mode == "idle"
                 ? _label
-                : (string.IsNullOrEmpty(_action) ? _label : _label + " · " + _action);
+                : _label + " · " + tag + (string.IsNullOrEmpty(_action) ? "" : " · " + _action);
             if (_mode == "idle") _focus.Text = "";
             else UpdateFocus();
             Invalidate();
@@ -2817,12 +2820,14 @@ namespace ComputerControl
             if (string.IsNullOrEmpty(label)) label = "待机";
             string action = Str(a, "action");
             if (action == null) action = "";
+            bool userPriority = Bool(a, "userPriority", true);
             int delay = Int(a, "delayHideMs", 2000);
-            Overlay.State(mode, label, action, delay);
+            Overlay.State(mode, label, action, delay, userPriority);
             Dictionary<string, object> res = new Dictionary<string, object>();
             res["mode"] = mode;
             res["label"] = label;
             res["action"] = action;
+            res["userPriority"] = userPriority;
             return res;
         }
 
