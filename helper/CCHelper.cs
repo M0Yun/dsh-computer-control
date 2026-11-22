@@ -1135,7 +1135,8 @@ namespace ComputerControl
                 string line = title;
                 if (!string.IsNullOrEmpty(exe)) line = string.IsNullOrEmpty(line) ? exe : line + "  (" + exe + ")";
                 if (string.IsNullOrEmpty(line)) line = "（没有聚焦窗口）";
-                if (line.Length > 34) line = line.Substring(0, 33) + "…";
+                // 不按固定字数截断，交给 AutoEllipsis 按当前窗口宽度显示省略号
+                if (line.Length > 160) line = line.Substring(0, 159) + "…";
                 _focus.Text = line;
             }
             catch
