@@ -447,6 +447,19 @@ namespace ComputerControl
             }
         }
 
+        public static string StatusText
+        {
+            get
+            {
+                try
+                {
+                    OverlayForm form = _form;
+                    return form == null ? "" : form.StatusText;
+                }
+                catch { return ""; }
+            }
+        }
+
         public static void Ensure()
         {
             if (_thread != null) return;
@@ -489,10 +502,10 @@ namespace ComputerControl
             Run(delegate { if (_form != null) _form.Configure(enabled, position, x, y, locked); });
         }
 
-        public static void State(string mode, string label, int step, int delayHideMs)
+        public static void State(string mode, string label, string action, int delayHideMs)
         {
             Ensure();
-            Run(delegate { if (_form != null) _form.UpdateState(mode, label, step, delayHideMs); });
+            Run(delegate { if (_form != null) _form.UpdateState(mode, label, action, delayHideMs); });
         }
 
         public static void Preview(int durationMs)
@@ -542,7 +555,7 @@ namespace ComputerControl
         private bool _enabled = true;
         private string _mode = "idle";
         private string _label = "待机";
-        private int _step;
+        private string _action = "";
         private string _position = "top-center";
         private int _customX;
         private int _customY;
@@ -602,7 +615,7 @@ namespace ComputerControl
                 _previewTimer.Stop();
                 SetCaptureVisible(false);
                 if (_mode == "idle") Hide();
-                else UpdateState(_mode, _label, _step, 2000);
+                else UpdateState(_mode, _label, _action, 2000);
             };
 
             // 第二行实时显示当前聚焦窗口，每秒刷新
@@ -759,12 +772,18 @@ namespace ComputerControl
             Location = new Point(left, top);
         }
 
-        public void UpdateState(string mode, string label, int step, int delayHideMs)
+        public string StatusText
         {
+            get { return _status.Text; }
+        }
+
+        public void UpdateState(string mode, string label, string action, int delayHideMs)        {
             _mode = string.IsNullOrEmpty(mode) ? "idle" : mode;
             _label = string.IsNullOrEmpty(label) ? "待机" : label;
-            _step = step;
-            _status.Text = _mode == "idle" ? _label : (_step > 0 ? _label + " · 第 " + _step + " 步" : _label);
+            _action = action ?? "";
+            _status.Text = _mode == "idle"
+                ? _label
+                : (string.IsNullOrEmpty(_action) ? _label : _label + " · " + _action);
             if (_mode == "idle") _focus.Text = "";
             else UpdateFocus();
             Invalidate();
@@ -2324,6 +2343,7 @@ namespace ComputerControl
             res["created"] = Overlay.Created;
             res["visible"] = Overlay.Visible;
             res["bounds"] = Overlay.Bounds;
+            res["text"] = Overlay.StatusText;
             if (Overlay.LastError != null) res["lastError"] = Overlay.LastError;
             return res;
         }
@@ -2334,13 +2354,14 @@ namespace ComputerControl
             if (string.IsNullOrEmpty(mode)) mode = "idle";
             string label = Str(a, "label");
             if (string.IsNullOrEmpty(label)) label = "待机";
-            int step = Int(a, "step", 0);
+            string action = Str(a, "action");
+            if (action == null) action = "";
             int delay = Int(a, "delayHideMs", 2000);
-            Overlay.State(mode, label, step, delay);
+            Overlay.State(mode, label, action, delay);
             Dictionary<string, object> res = new Dictionary<string, object>();
             res["mode"] = mode;
             res["label"] = label;
-            res["step"] = step;
+            res["action"] = action;
             return res;
         }
 
