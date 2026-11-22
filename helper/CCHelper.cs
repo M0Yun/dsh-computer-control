@@ -497,10 +497,10 @@ namespace ComputerControl
             }
         }
 
-        public static void Configure(bool enabled, string position, int x, int y, bool locked, int width)
+        public static void Configure(bool enabled, string position, int x, int y, bool locked, int width, double opacity)
         {
             Ensure();
-            Run(delegate { if (_form != null) _form.Configure(enabled, position, x, y, locked, width); });
+            Run(delegate { if (_form != null) _form.Configure(enabled, position, x, y, locked, width, opacity); });
         }
 
         public static void State(string mode, string label, string action, int delayHideMs)
@@ -592,6 +592,7 @@ namespace ComputerControl
         private int _resizeStartWidth;
         private int _resizeCenterX;
         private int _fullWidth = 460;
+        private double _baseOpacity = 0.85;
         private const int FullHeight = 62;
 
         public OverlayForm()
@@ -778,7 +779,7 @@ namespace ComputerControl
                 e.Graphics.DrawLine(pen, Width - 124, 12, Width - 124, Height - 12);
         }
 
-        public void Configure(bool enabled, string position, int x, int y, bool locked, int width)
+        public void Configure(bool enabled, string position, int x, int y, bool locked, int width, double opacity)
         {
             _enabled = enabled;
             _position = string.IsNullOrEmpty(position) ? "top-center" : position;
@@ -787,6 +788,8 @@ namespace ComputerControl
             _locked = locked;
             _lock.Locked = _locked;
             _lock.Cursor = _locked ? Cursors.Default : Cursors.Hand;
+            _baseOpacity = Math.Max(0.3, Math.Min(1.0, opacity <= 0 ? 0.85 : opacity));
+            if (!_animTimer.Enabled) Opacity = _baseOpacity;
 
             int targetWidth = Math.Max(300, Math.Min(900, width <= 0 ? _fullWidth : width));
             if (targetWidth != _fullWidth)
@@ -909,7 +912,7 @@ namespace ComputerControl
             _animCenterX = Left + Width / 2;
             _animCenterY = Top + Height / 2;
             Region = RoundedRegion(Size, 23);
-            Opacity = 1;
+            Opacity = _baseOpacity;
             HideControls(false);
             ApplyLayout();
             Show();
@@ -927,7 +930,7 @@ namespace ComputerControl
                 _closing = false;
                 base.Hide();
                 Size = new Size(_fullWidth, FullHeight);
-                Opacity = 1;
+                Opacity = _baseOpacity;
                 return;
             }
             if (_animTimer.Enabled) return;
@@ -985,7 +988,7 @@ namespace ComputerControl
                     _closing = false;
                     base.Hide();
                     Size = new Size(_fullWidth, FullHeight);
-                    Opacity = 1;
+                    Opacity = _baseOpacity;
                 }
             }
         }
@@ -996,7 +999,7 @@ namespace ComputerControl
             Left = _animCenterX - Width / 2;
             Top = _animCenterY - Height / 2;
             Region = RoundedRegion(Size, 23);
-            Opacity = 1;
+            Opacity = _baseOpacity;
             HideControls(false);
             ApplyLayout();
             TopMost = true;
@@ -1008,7 +1011,7 @@ namespace ComputerControl
             Left = centerX - Width / 2;
             Top = centerY - Height / 2;
             Region = RoundedRegion(Size, Math.Min(31, Height / 2));
-            try { Opacity = Math.Max(0, Math.Min(1, opacity)); } catch { }
+            try { Opacity = Math.Max(0, Math.Min(1, _baseOpacity * opacity)); } catch { }
         }
 
         private void HideControls(bool hidden)
@@ -1026,7 +1029,8 @@ namespace ComputerControl
         {
             Panel grip = new Panel();
             grip.Cursor = Cursors.SizeWE;
-            grip.BackColor = Color.Transparent;
+            // 用胶囊同色而不是透明：透明 Panel 在圆角处会透出系统底色，看着像两个灰块
+            grip.BackColor = BackColor;
             grip.MouseDown += ResizeDown;
             grip.MouseMove += ResizeMove;
             grip.MouseUp += ResizeUp;
@@ -1097,7 +1101,7 @@ namespace ComputerControl
             _hideTimer.Stop();
             base.Hide();
             Size = new Size(_fullWidth, FullHeight);
-            Opacity = 1;
+            Opacity = _baseOpacity;
             _dodgeTimer.Stop();
             _dodgeTimer.Interval = Math.Max(400, holdMs);
             _dodgeTimer.Start();
@@ -2627,12 +2631,14 @@ namespace ComputerControl
             int x = Int(a, "x", 0);
             int y = Int(a, "y", 0);
             int width = Int(a, "width", 460);
-            Overlay.Configure(enabled, position, x, y, locked, width);
+            double opacity = Num(a, "opacity", 0.85);
+            Overlay.Configure(enabled, position, x, y, locked, width, opacity);
             Dictionary<string, object> res = new Dictionary<string, object>();
             res["enabled"] = enabled;
             res["position"] = position;
             res["locked"] = locked;
             res["width"] = Math.Max(300, Math.Min(900, width));
+            res["opacity"] = Math.Round(Math.Max(0.3, Math.Min(1.0, opacity <= 0 ? 0.85 : opacity)), 2);
             res["created"] = Overlay.Created;
             if (Overlay.LastError != null) res["lastError"] = Overlay.LastError;
             return res;
