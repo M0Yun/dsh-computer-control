@@ -175,8 +175,45 @@ namespace ComputerControl
         public static readonly List<Dictionary<string, object>> Session = new List<Dictionary<string, object>>();
         public static volatile bool Learning;
         public static DateTime SessionStart = DateTime.Now;
-        /** 最近一次「真人」点击/滚轮/按键的时间（注入事件不算）。 */
+        /** 最近一次「真人」点击/滚轮/按键/移动的时间（注入事件不算）。 */
         public static volatile int LastUserTick;
+
+        private static System.Threading.Timer _moveTimer;
+        private static int _moveX;
+        private static int _moveY;
+        private static bool _moveValid;
+
+        /** 我们自己移动光标后登记一下，免得被当成用户在动鼠标。 */
+        public static void NoteCursorMove(int x, int y)
+        {
+            _moveX = x;
+            _moveY = y;
+            _moveValid = true;
+        }
+
+        /** 每 45ms 看一眼光标；位置变了又没登记，就认为是真人在挪鼠标。 */
+        private static void StartMoveWatch()
+        {
+            if (_moveTimer != null) return;
+            POINT p;
+            if (Native.GetCursorPos(out p)) NoteCursorMove(p.X, p.Y);
+            _moveTimer = new System.Threading.Timer(delegate
+            {
+                try
+                {
+                    POINT cur;
+                    if (!Native.GetCursorPos(out cur)) return;
+                    if (!_moveValid) { NoteCursorMove(cur.X, cur.Y); return; }
+                    if (cur.X != _moveX || cur.Y != _moveY)
+                    {
+                        LastUserTick = Environment.TickCount;
+                        _moveX = cur.X;
+                        _moveY = cur.Y;
+                    }
+                }
+                catch { }
+            }, null, 45, 45);
+        }
 
         private static IntPtr _mouseHook;
         private static IntPtr _keyHook;
@@ -209,6 +246,7 @@ namespace ComputerControl
             _thread.SetApartmentState(ApartmentState.STA);
             _thread.Start();
             Thread.Sleep(80);
+            StartMoveWatch();
         }
 
         public static void Uninstall()
@@ -916,10 +954,9 @@ namespace ComputerControl
                 _status.Text = _alertText;
                 return;
             }
-            string tag = _userPriority ? "用户优先" : "可抢占";
             _status.Text = _mode == "idle"
                 ? _label
-                : _label + " · " + tag + (string.IsNullOrEmpty(_action) ? "" : " · " + _action);
+                : _label + (string.IsNullOrEmpty(_action) ? "" : " · " + _action);
         }
 
         /** 临时改第一行文字（用户抢鼠标时显示「让开中」之类），到点自动恢复。 */
@@ -1982,6 +2019,7 @@ namespace ComputerControl
             Overlay.DodgeIfCovered(x, y, 700);
             if (!Native.SetCursorPos(x, y)) throw new InvalidOperationException("SetCursorPos 失败");
             Send(MouseInput(Native.MOUSEEVENTF_MOVE, 0, 0, 0));
+            InputLog.NoteCursorMove(x, y);
         }
 
         /** 用户优先：真人刚动过鼠标键盘时就别抢。 */
@@ -2129,6 +2167,7 @@ namespace ComputerControl
                     int nx = x + (x2 - x) * i / steps;
                     int ny = y + (y2 - y) * i / steps;
                     Native.SetCursorPos(nx, ny);
+                    InputLog.NoteCursorMove(nx, ny);
                     lastX = nx;
                     lastY = ny;
                     Thread.Sleep(duration / steps);
