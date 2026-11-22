@@ -534,6 +534,13 @@ namespace ComputerControl
             Run(delegate { if (_form != null) _form.Preview(durationMs); });
         }
 
+        /** 临时状态提示（用户抢鼠标时显示「让开中」），到点自动恢复。 */
+        public static void Alert(string text, int durationMs)
+        {
+            Ensure();
+            Run(delegate { if (_form != null) _form.ShowAlert(text, durationMs); });
+        }
+
         /** 控制动作的目标点被悬浮岛盖住时，先把悬浮岛藏起来，动作结束再回来。 */
         public static void DodgeIfCovered(int x, int y, int holdMs)
         {
@@ -583,6 +590,8 @@ namespace ComputerControl
         private readonly System.Windows.Forms.Timer _hideTimer;
         private readonly System.Windows.Forms.Timer _previewTimer;
         private readonly System.Windows.Forms.Timer _focusTimer;
+        private readonly System.Windows.Forms.Timer _alertTimer;
+        private string _alertText = "";
         private bool _locked;
         private bool _enabled = true;
         private string _mode = "idle";
@@ -686,6 +695,16 @@ namespace ComputerControl
                 SetCaptureVisible(false);
                 if (_mode == "idle") HideIsland(true);
                 else UpdateState(_mode, _label, _action, 2000, _userPriority);
+            };
+
+            // 临时状态提示：比如「让开中：检测到你在操作」，过几秒自动恢复
+            _alertTimer = new System.Windows.Forms.Timer();
+            _alertTimer.Interval = 2200;
+            _alertTimer.Tick += delegate
+            {
+                _alertTimer.Stop();
+                _alertText = "";
+                UpdateStatusText();
             };
 
             // 第二行实时显示当前聚焦窗口，每秒刷新
@@ -873,10 +892,7 @@ namespace ComputerControl
             _label = string.IsNullOrEmpty(label) ? "待机" : label;
             _action = action ?? "";
             _userPriority = userPriority;
-            string tag = _userPriority ? "用户优先" : "可抢占";
-            _status.Text = _mode == "idle"
-                ? _label
-                : _label + " · " + tag + (string.IsNullOrEmpty(_action) ? "" : " · " + _action);
+            UpdateStatusText();
             if (_mode == "idle") _focus.Text = "";
             else UpdateFocus();
             Invalidate();
@@ -891,6 +907,29 @@ namespace ComputerControl
             {
                 ShowIsland();
             }
+        }
+
+        private void UpdateStatusText()
+        {
+            if (!string.IsNullOrEmpty(_alertText))
+            {
+                _status.Text = _alertText;
+                return;
+            }
+            string tag = _userPriority ? "用户优先" : "可抢占";
+            _status.Text = _mode == "idle"
+                ? _label
+                : _label + " · " + tag + (string.IsNullOrEmpty(_action) ? "" : " · " + _action);
+        }
+
+        /** 临时改第一行文字（用户抢鼠标时显示「让开中」之类），到点自动恢复。 */
+        public void ShowAlert(string text, int durationMs)
+        {
+            _alertText = text ?? "";
+            UpdateStatusText();
+            _alertTimer.Stop();
+            _alertTimer.Interval = Math.Max(600, Math.Min(60000, durationMs));
+            _alertTimer.Start();
         }
 
         private void ShowIsland()
@@ -1394,6 +1433,7 @@ namespace ComputerControl
                 case "overlay.config": return OverlayConfigure(args);
                 case "overlay.state": return OverlayState(args);
                 case "overlay.preview": return OverlayPreview(args);
+                case "overlay.alert": return OverlayAlert(args);
                 case "overlay.status": return OverlayStatus();
                 case "shutdown": StopWatch(); return new Dictionary<string, object> { { "bye", true } };
                 default: throw new InvalidOperationException("未知命令：" + cmd);
@@ -2789,6 +2829,18 @@ namespace ComputerControl
             res["opacity"] = Math.Round(Math.Max(0.3, Math.Min(1.0, opacity <= 0 ? 0.85 : opacity)), 2);
             res["created"] = Overlay.Created;
             if (Overlay.LastError != null) res["lastError"] = Overlay.LastError;
+            return res;
+        }
+
+        private object OverlayAlert(Dictionary<string, object> a)
+        {
+            string text = Str(a, "text");
+            if (string.IsNullOrEmpty(text)) text = "用户优先 · 让开中";
+            int durationMs = Math.Max(600, Math.Min(60000, Int(a, "durationMs", 2200)));
+            Overlay.Alert(text, durationMs);
+            Dictionary<string, object> res = new Dictionary<string, object>();
+            res["text"] = text;
+            res["durationMs"] = durationMs;
             return res;
         }
 
