@@ -2874,7 +2874,7 @@ namespace ComputerControl
         private object OverlayAlert(Dictionary<string, object> a)
         {
             string text = Str(a, "text");
-            if (string.IsNullOrEmpty(text)) text = "用户优先 · 让开中";
+            if (string.IsNullOrEmpty(text)) text = "停止操作：用户优先";
             int durationMs = Math.Max(600, Math.Min(60000, Int(a, "durationMs", 2200)));
             Overlay.Alert(text, durationMs);
             Dictionary<string, object> res = new Dictionary<string, object>();
