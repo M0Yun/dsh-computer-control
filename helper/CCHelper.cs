@@ -714,7 +714,6 @@ namespace ComputerControl
             _focus.AutoEllipsis = true;
             _stop = MakeText("停止", Color.FromArgb(255, 128, 128), ContentAlignment.MiddleCenter);
             _pause = MakeText("暂停", Color.FromArgb(255, 196, 80), ContentAlignment.MiddleCenter);
-            _pause.Font = new Font("Microsoft YaHei UI", 8.5f);
             _pause.Cursor = Cursors.Hand;
             _lock = new LockGlyph();
             Controls.Add(_lock);
@@ -862,9 +861,9 @@ namespace ComputerControl
                 _close.Visible = false;
                 _lock.Bounds = new Rectangle(Width - 40, 12, 30, 38);
                 _stop.Bounds = new Rectangle(Width - 96, 12, 50, 38);
-                _pause.Bounds = new Rectangle(Width - 144, 12, 40, 38);
-                _status.Bounds = new Rectangle(34, 4, Width - 186, 28);
-                _focus.Bounds = new Rectangle(34, 30, Width - 186, 28);
+                _pause.Bounds = new Rectangle(Width - 154, 12, 50, 38);
+                _status.Bounds = new Rectangle(34, 4, Width - 196, 28);
+                _focus.Bounds = new Rectangle(34, 30, Width - 196, 28);
                 _status.Cursor = Cursors.Default;
             }
             else
@@ -873,9 +872,9 @@ namespace ComputerControl
                 _close.Bounds = new Rectangle(Width - 34, 12, 26, 38);
                 _lock.Bounds = new Rectangle(Width - 66, 12, 30, 38);
                 _stop.Bounds = new Rectangle(Width - 118, 12, 50, 38);
-                _pause.Bounds = new Rectangle(Width - 166, 12, 40, 38);
-                _status.Bounds = new Rectangle(34, 4, Width - 208, 28);
-                _focus.Bounds = new Rectangle(34, 30, Width - 208, 28);
+                _pause.Bounds = new Rectangle(Width - 176, 12, 50, 38);
+                _status.Bounds = new Rectangle(34, 4, Width - 220, 28);
+                _focus.Bounds = new Rectangle(34, 30, Width - 220, 28);
                 _status.Cursor = Cursors.SizeAll;
             }
         }
