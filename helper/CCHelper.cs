@@ -663,10 +663,24 @@ namespace ComputerControl
 
         private void ApplyLayout()
         {
-            _close.Bounds = new Rectangle(Width - 34, 4, 26, 38);
-            _lock.Bounds = new Rectangle(Width - 66, 4, 30, 38);
-            _stop.Bounds = new Rectangle(Width - 118, 4, 50, 38);
-            _status.Bounds = new Rectangle(34, 0, Width - 152, Height);
+            if (_locked)
+            {
+                // 锁定：藏掉 ×（不能关、不能拖），只留停止和锁
+                _close.Visible = false;
+                _lock.Bounds = new Rectangle(Width - 40, 4, 30, 38);
+                _stop.Bounds = new Rectangle(Width - 96, 4, 50, 38);
+                _status.Bounds = new Rectangle(34, 0, Width - 130, Height);
+                _status.Cursor = Cursors.Default;
+            }
+            else
+            {
+                _close.Visible = true;
+                _close.Bounds = new Rectangle(Width - 34, 4, 26, 38);
+                _lock.Bounds = new Rectangle(Width - 66, 4, 30, 38);
+                _stop.Bounds = new Rectangle(Width - 118, 4, 50, 38);
+                _status.Bounds = new Rectangle(34, 0, Width - 152, Height);
+                _status.Cursor = Cursors.SizeAll;
+            }
         }
 
         protected override void OnPaint(PaintEventArgs e)
@@ -692,6 +706,7 @@ namespace ComputerControl
             _locked = locked;
             _lock.Locked = _locked;
             _lock.Cursor = _locked ? Cursors.Default : Cursors.Hand;
+            ApplyLayout();
             if (!_enabled)
             {
                 _hideTimer.Stop();
@@ -761,6 +776,7 @@ namespace ComputerControl
             _locked = !_locked;
             _lock.Locked = _locked;
             _lock.Cursor = _locked ? Cursors.Default : Cursors.Hand;
+            ApplyLayout();
             Dictionary<string, object> data = new Dictionary<string, object>();
             data["locked"] = _locked;
             Overlay.Raise("overlay.locked", data);
