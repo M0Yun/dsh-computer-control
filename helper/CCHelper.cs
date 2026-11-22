@@ -712,7 +712,7 @@ namespace ComputerControl
             _focus = MakeText("", Color.FromArgb(175, 185, 200), ContentAlignment.MiddleLeft);
             _focus.Font = new Font("Microsoft YaHei UI", 8.5f);
             _focus.AutoEllipsis = true;
-            _stop = MakeText("停止", Color.FromArgb(255, 128, 128), ContentAlignment.MiddleCenter);
+            _stop = MakeText("结束", Color.FromArgb(255, 128, 128), ContentAlignment.MiddleCenter);
             _pause = MakeText("暂停", Color.FromArgb(255, 196, 80), ContentAlignment.MiddleCenter);
             _pause.Cursor = Cursors.Hand;
             _lock = new LockGlyph();
