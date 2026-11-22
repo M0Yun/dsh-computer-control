@@ -63,6 +63,7 @@ namespace ComputerControl
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern short VkKeyScan(char ch);
         [DllImport("user32.dll")] public static extern uint MapVirtualKey(uint code, uint mapType);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetKeyNameText(int lParam, StringBuilder text, int count);
+        [DllImport("user32.dll")] public static extern IntPtr GetMessageExtraInfo();
 
         [DllImport("user32.dll", SetLastError = true)]
         public static extern IntPtr SetWindowsHookEx(int idHook, HookProc lpfn, IntPtr hMod, uint dwThreadId);
@@ -514,6 +515,18 @@ namespace ComputerControl
             Run(delegate { if (_form != null) _form.Preview(durationMs); });
         }
 
+        /** 控制动作的目标点被悬浮岛盖住时，先把悬浮岛藏起来，动作结束再回来。 */
+        public static void DodgeIfCovered(int x, int y, int holdMs)
+        {
+            try
+            {
+                OverlayForm form = _form;
+                if (form == null) return;
+                form.BeginInvoke((Action)delegate { form.DodgeIfCovered(x, y, holdMs); });
+            }
+            catch { }
+        }
+
         private static void Run(Action action)
         {
             try
@@ -563,6 +576,16 @@ namespace ComputerControl
         private bool _moved;
         private Point _dragStart;
         private Point _windowStart;
+        private readonly System.Windows.Forms.Timer _animTimer;
+        private readonly System.Windows.Forms.Timer _dodgeTimer;
+        private readonly Stopwatch _animClock = new Stopwatch();
+        private bool _opening;
+        private bool _closing;
+        private bool _dodged;
+        private int _animCenterX;
+        private int _animCenterY;
+        private const int FullWidth = 460;
+        private const int FullHeight = 62;
 
         public OverlayForm()
         {
@@ -590,9 +613,9 @@ namespace ComputerControl
             _close.Cursor = Cursors.Hand;
 
             _stop.Cursor = Cursors.Hand;
-            _stop.Click += delegate { Overlay.Raise("overlay.stop"); };
-            _lock.Click += delegate { ToggleLock(); };
-            _close.Click += delegate { Overlay.Raise("overlay.close"); };
+            _stop.Click += delegate { if (Injected()) return; Overlay.Raise("overlay.stop"); };
+            _lock.Click += delegate { if (Injected()) return; ToggleLock(); };
+            _close.Click += delegate { if (Injected()) return; Overlay.Raise("overlay.close"); };
 
             _status.MouseDown += DragDown;
             _status.MouseMove += DragMove;
@@ -606,7 +629,22 @@ namespace ComputerControl
 
             _hideTimer = new System.Windows.Forms.Timer();
             _hideTimer.Interval = 2000;
-            _hideTimer.Tick += delegate { _hideTimer.Stop(); Hide(); };
+            _hideTimer.Tick += delegate { _hideTimer.Stop(); HideIsland(true); };
+
+            // 收拢/展开动画
+            _animTimer = new System.Windows.Forms.Timer();
+            _animTimer.Interval = 16;
+            _animTimer.Tick += AnimTick;
+
+            // 控制动作命中悬浮岛时临时藏起来，动作结束再回来
+            _dodgeTimer = new System.Windows.Forms.Timer();
+            _dodgeTimer.Interval = 700;
+            _dodgeTimer.Tick += delegate
+            {
+                _dodgeTimer.Stop();
+                _dodged = false;
+                if (_enabled && _mode != "idle") ShowIslandNoAnim();
+            };
 
             // 预览时临时允许截屏，方便在设置页里看清样式；结束后恢复「排除截屏」。
             _previewTimer = new System.Windows.Forms.Timer();
@@ -614,7 +652,7 @@ namespace ComputerControl
             {
                 _previewTimer.Stop();
                 SetCaptureVisible(false);
-                if (_mode == "idle") Hide();
+                if (_mode == "idle") HideIsland(true);
                 else UpdateState(_mode, _label, _action, 2000);
             };
 
@@ -737,7 +775,7 @@ namespace ComputerControl
             if (!_enabled)
             {
                 _hideTimer.Stop();
-                Hide();
+                HideIsland(false);
                 return;
             }
             ApplyPosition();
@@ -777,7 +815,8 @@ namespace ComputerControl
             get { return _status.Text; }
         }
 
-        public void UpdateState(string mode, string label, string action, int delayHideMs)        {
+        public void UpdateState(string mode, string label, string action, int delayHideMs)
+        {
             _mode = string.IsNullOrEmpty(mode) ? "idle" : mode;
             _label = string.IsNullOrEmpty(label) ? "待机" : label;
             _action = action ?? "";
@@ -802,8 +841,191 @@ namespace ComputerControl
 
         private void ShowIsland()
         {
-            if (!Visible) Show();
+            if (!_enabled || _dodged) return;
+            if (Visible)
+            {
+                if (_closing)
+                {
+                    _animTimer.Stop();
+                    _closing = false;
+                    FinishOpen();
+                }
+                TopMost = true;
+                return;
+            }
+            if (_closing)
+            {
+                _animTimer.Stop();
+                _closing = false;
+            }
+            HideControls(true);
+            ApplyPosition();
+            _animCenterX = Left + Width / 2;
+            _animCenterY = Top + Height / 2;
+            _opening = true;
+            Opacity = 0;
+            SetAnimatedBounds(_animCenterX, _animCenterY, 8, 8, 0);
+            Show();
             TopMost = true;
+            _animClock.Restart();
+            _animTimer.Start();
+        }
+
+        private void ShowIslandNoAnim()
+        {
+            if (!_enabled || _dodged) return;
+            HideControls(true);
+            Size = new Size(FullWidth, FullHeight);
+            ApplyPosition();
+            _animCenterX = Left + Width / 2;
+            _animCenterY = Top + Height / 2;
+            Region = RoundedRegion(Size, 23);
+            Opacity = 1;
+            HideControls(false);
+            ApplyLayout();
+            Show();
+            TopMost = true;
+            UpdateFocus();
+        }
+
+        private void HideIsland(bool animate)
+        {
+            if (!Visible) return;
+            if (!animate || _dodged)
+            {
+                _animTimer.Stop();
+                _opening = false;
+                _closing = false;
+                base.Hide();
+                Size = new Size(FullWidth, FullHeight);
+                Opacity = 1;
+                return;
+            }
+            if (_animTimer.Enabled) return;
+            _closing = true;
+            _opening = false;
+            _animCenterX = Left + Width / 2;
+            _animCenterY = Top + Height / 2;
+            HideControls(true);
+            _animClock.Restart();
+            _animTimer.Start();
+        }
+
+        /** 收拢/展开动画：先两侧收成圆，再缩放淡出；打开反过来。 */
+        private void AnimTick(object sender, EventArgs e)
+        {
+            double t = _animClock.Elapsed.TotalMilliseconds;
+            if (_opening)
+            {
+                if (t < 150)
+                {
+                    double k = t / 150.0;
+                    int size = (int)Math.Round(8 + 54 * Ease(k));
+                    SetAnimatedBounds(_animCenterX, _animCenterY, size, size, k);
+                }
+                else if (t < 320)
+                {
+                    double k = (t - 150) / 170.0;
+                    int width = (int)Math.Round(62 + (FullWidth - 62) * Ease(k));
+                    SetAnimatedBounds(_animCenterX, _animCenterY, width, FullHeight, 1);
+                }
+                else
+                {
+                    _animTimer.Stop();
+                    _opening = false;
+                    FinishOpen();
+                }
+            }
+            else if (_closing)
+            {
+                if (t < 170)
+                {
+                    double k = t / 170.0;
+                    int width = (int)Math.Round(FullWidth - (FullWidth - 62) * Ease(k));
+                    SetAnimatedBounds(_animCenterX, _animCenterY, width, FullHeight, 1);
+                }
+                else if (t < 320)
+                {
+                    double k = (t - 170) / 150.0;
+                    int size = (int)Math.Round(62 - 54 * Ease(k));
+                    SetAnimatedBounds(_animCenterX, _animCenterY, size, size, 1 - k);
+                }
+                else
+                {
+                    _animTimer.Stop();
+                    _closing = false;
+                    base.Hide();
+                    Size = new Size(FullWidth, FullHeight);
+                    Opacity = 1;
+                }
+            }
+        }
+
+        private void FinishOpen()
+        {
+            Size = new Size(FullWidth, FullHeight);
+            Left = _animCenterX - Width / 2;
+            Top = _animCenterY - Height / 2;
+            Region = RoundedRegion(Size, 23);
+            Opacity = 1;
+            HideControls(false);
+            ApplyLayout();
+            TopMost = true;
+        }
+
+        private void SetAnimatedBounds(int centerX, int centerY, int width, int height, double opacity)
+        {
+            Size = new Size(Math.Max(4, width), Math.Max(4, height));
+            Left = centerX - Width / 2;
+            Top = centerY - Height / 2;
+            Region = RoundedRegion(Size, Math.Min(31, Height / 2));
+            try { Opacity = Math.Max(0, Math.Min(1, opacity)); } catch { }
+        }
+
+        private void HideControls(bool hidden)
+        {
+            _status.Visible = !hidden;
+            _focus.Visible = !hidden;
+            _stop.Visible = !hidden;
+            _lock.Visible = !hidden;
+            _close.Visible = !hidden;
+        }
+
+        private static double Ease(double k)
+        {
+            if (k < 0) k = 0;
+            if (k > 1) k = 1;
+            return 1 - Math.Pow(1 - k, 3);
+        }
+
+        public void DodgeIfCovered(int x, int y, int holdMs)
+        {
+            if (!Visible) return;
+            Rectangle r = Bounds;
+            if (x < r.Left - 4 || x > r.Right + 4 || y < r.Top - 4 || y > r.Bottom + 4) return;
+            Dodge(holdMs);
+        }
+
+        private void Dodge(int holdMs)
+        {
+            _dodged = true;
+            _animTimer.Stop();
+            _opening = false;
+            _closing = false;
+            _hideTimer.Stop();
+            base.Hide();
+            Size = new Size(FullWidth, FullHeight);
+            Opacity = 1;
+            _dodgeTimer.Stop();
+            _dodgeTimer.Interval = Math.Max(400, holdMs);
+            _dodgeTimer.Start();
+        }
+
+        /** 我们自己注入的鼠标事件点不到悬浮岛按钮，避免控制电脑时误触。 */
+        private static bool Injected()
+        {
+            try { return Native.GetMessageExtraInfo() == new IntPtr(0x1C0DE1); }
+            catch { return false; }
         }
 
         protected override void OnVisibleChanged(EventArgs e)
@@ -854,6 +1076,7 @@ namespace ComputerControl
         private void DragDown(object sender, MouseEventArgs e)
         {
             if (_locked || e.Button != MouseButtons.Left) return;
+            if (Injected()) return;
             _dragging = true;
             _moved = false;
             _dragStart = Cursor.Position;
@@ -1581,6 +1804,7 @@ namespace ComputerControl
 
         private static void MoveTo(int x, int y)
         {
+            Overlay.DodgeIfCovered(x, y, 700);
             if (!Native.SetCursorPos(x, y)) throw new InvalidOperationException("SetCursorPos 失败");
             Send(MouseInput(Native.MOUSEEVENTF_MOVE, 0, 0, 0));
         }
@@ -1688,6 +1912,7 @@ namespace ComputerControl
             int y2 = Int(a, "y2", y);
             int duration = Math.Max(120, Math.Min(3000, Int(a, "duration", 350)));
             string button = (Str(a, "button") ?? "left").ToLowerInvariant();
+            Overlay.DodgeIfCovered(x2, y2, duration + 900);
             uint down, up;
             if (button == "right") { down = Native.MOUSEEVENTF_RIGHTDOWN; up = Native.MOUSEEVENTF_RIGHTUP; }
             else { down = Native.MOUSEEVENTF_LEFTDOWN; up = Native.MOUSEEVENTF_LEFTUP; }
