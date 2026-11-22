@@ -175,6 +175,8 @@ namespace ComputerControl
         public static readonly List<Dictionary<string, object>> Session = new List<Dictionary<string, object>>();
         public static volatile bool Learning;
         public static DateTime SessionStart = DateTime.Now;
+        /** 最近一次「真人」点击/滚轮/按键的时间（注入事件不算）。 */
+        public static volatile int LastUserTick;
 
         private static IntPtr _mouseHook;
         private static IntPtr _keyHook;
@@ -186,6 +188,18 @@ namespace ComputerControl
         private static readonly Stopwatch Clock = Stopwatch.StartNew();
 
         public static readonly string[] ModifierKeys = new string[] { "ctrl", "shift", "alt", "win" };
+
+        /** 距离最近一次真人输入多久；从没输入过就算很久。 */
+        public static int UserIdleMs
+        {
+            get
+            {
+                int t = LastUserTick;
+                if (t == 0) return int.MaxValue;
+                int idle = unchecked(Environment.TickCount - t);
+                return idle < 0 ? 0 : idle;
+            }
+        }
 
         public static void Install()
         {
@@ -236,6 +250,7 @@ namespace ComputerControl
                         else if (msg == 0x0204) Record("mouse", "click", "right", data.pt.X, data.pt.Y, 0);
                         else if (msg == 0x0207) Record("mouse", "click", "middle", data.pt.X, data.pt.Y, 0);
                         else if (msg == 0x020A) Record("mouse", "wheel", null, data.pt.X, data.pt.Y, (short)((data.mouseData >> 16) & 0xFFFF));
+                        LastUserTick = Environment.TickCount;
                     }
                 }
                 catch { }
@@ -256,6 +271,7 @@ namespace ComputerControl
                         int msg = wParam.ToInt32();
                         if (msg == 0x0100 || msg == 0x0104)
                             Record("key", "down", null, -1, -1, 0, data.vkCode);
+                        LastUserTick = Environment.TickCount;
                     }
                 }
                 catch { }
@@ -1459,6 +1475,7 @@ namespace ComputerControl
                 else d["idleMs"] = 0;
             }
             catch { d["idleMs"] = 0; }
+            d["userIdleMs"] = InputLog.UserIdleMs;
             d["watching"] = _watchRun;
             d["learning"] = InputLog.Learning;
             d["uptimeMs"] = _clock.ElapsedMilliseconds;
@@ -1924,8 +1941,18 @@ namespace ComputerControl
             Send(MouseInput(Native.MOUSEEVENTF_MOVE, 0, 0, 0));
         }
 
+        /** 用户优先：真人刚动过鼠标键盘时就别抢。 */
+        private static void EnsureUserIdle(Dictionary<string, object> a)
+        {
+            if (!Bool(a, "yieldToUser", true)) return;
+            int idle = InputLog.UserIdleMs;
+            if (idle < 350)
+                throw new InvalidOperationException("USER_BUSY: 你正在操作鼠标键盘（" + idle + "ms 前还有输入），我先让开。");
+        }
+
         private static object Move(Dictionary<string, object> a)
         {
+            EnsureUserIdle(a);
             int x = Int(a, "x", 0);
             int y = Int(a, "y", 0);
             MoveTo(x, y);
@@ -1991,6 +2018,7 @@ namespace ComputerControl
 
         private static object Click(Dictionary<string, object> a)
         {
+            EnsureUserIdle(a);
             int x = Int(a, "x", 0);
             int y = Int(a, "y", 0);
             int count = Math.Max(1, Math.Min(3, Int(a, "count", 1)));
@@ -2021,6 +2049,7 @@ namespace ComputerControl
 
         private object Drag(Dictionary<string, object> a)
         {
+            EnsureUserIdle(a);
             int x = Int(a, "x", 0);
             int y = Int(a, "y", 0);
             int x2 = Int(a, "x2", x);
@@ -2036,14 +2065,36 @@ namespace ComputerControl
             Thread.Sleep(60);
             Send(MouseInput(down, 0, 0, 0));
             int steps = Math.Max(8, duration / 16);
-            for (int i = 1; i <= steps; i++)
+            bool released = false;
+            int lastX = x, lastY = y;
+            try
             {
-                int nx = x + (x2 - x) * i / steps;
-                int ny = y + (y2 - y) * i / steps;
-                Native.SetCursorPos(nx, ny);
-                Thread.Sleep(duration / steps);
+                for (int i = 1; i <= steps; i++)
+                {
+                    // 用户接管：光标被真人挪走了（我们每步都精确落点，偏离就说明有人抢）
+                    if (Bool(a, "yieldToUser", true))
+                    {
+                        POINT cur;
+                        if (Native.GetCursorPos(out cur)
+                            && (Math.Abs(cur.X - lastX) > 4 || Math.Abs(cur.Y - lastY) > 4))
+                        {
+                            Send(MouseInput(up, 0, 0, 0));
+                            released = true;
+                            throw new InvalidOperationException("USER_BUSY: 拖动时你接管了鼠标，我已经松开。");
+                        }
+                    }
+                    int nx = x + (x2 - x) * i / steps;
+                    int ny = y + (y2 - y) * i / steps;
+                    Native.SetCursorPos(nx, ny);
+                    lastX = nx;
+                    lastY = ny;
+                    Thread.Sleep(duration / steps);
+                }
             }
-            Send(MouseInput(up, 0, 0, 0));
+            finally
+            {
+                if (!released) Send(MouseInput(up, 0, 0, 0));
+            }
             Dictionary<string, object> res = new Dictionary<string, object>();
             res["from"] = new Dictionary<string, object> { { "x", x }, { "y", y } };
             res["to"] = new Dictionary<string, object> { { "x", x2 }, { "y", y2 } };
@@ -2053,6 +2104,7 @@ namespace ComputerControl
 
         private object Scroll(Dictionary<string, object> a)
         {
+            EnsureUserIdle(a);
             int x = Int(a, "x", 0);
             int y = Int(a, "y", 0);
             int delta = Int(a, "delta", -120);
@@ -2071,6 +2123,7 @@ namespace ComputerControl
 
         private object Key(Dictionary<string, object> a)
         {
+            EnsureUserIdle(a);
             string keys = Str(a, "keys");
             if (string.IsNullOrEmpty(keys)) throw new InvalidOperationException("key 需要 keys，例如 ctrl+s");
             string[] parts = keys.Split('+');
@@ -2094,6 +2147,7 @@ namespace ComputerControl
 
         private object TypeText(Dictionary<string, object> a)
         {
+            EnsureUserIdle(a);
             string text = Str(a, "text");
             if (text == null) throw new InvalidOperationException("type 需要 text");
             foreach (char ch in text)
