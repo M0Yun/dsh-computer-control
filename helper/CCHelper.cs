@@ -13,6 +13,7 @@ using System.Text;
 using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Automation;
+using System.Windows.Forms;
 
 namespace ComputerControl
 {
@@ -395,6 +396,407 @@ namespace ComputerControl
         }
     }
 
+    /// <summary>
+    /// 屏幕上的「灵动岛」悬浮窗：显示当前状态，可拖动、可锁定，点停止会发事件给上层。
+    /// 独立 STA 线程 + 无激活窗口，尽量不影响正在操作的程序，也尽量不进截图。
+    /// </summary>
+    internal static class Overlay
+    {
+        private static OverlayForm _form;
+        private static Thread _thread;
+        private static readonly object Sync = new object();
+        private static string _lastError;
+        public static Action<string, Dictionary<string, object>> Event;
+
+        private static void Log(string text)
+        {
+            try
+            {
+                System.IO.File.AppendAllText(
+                    System.IO.Path.Combine(System.IO.Path.GetTempPath(), "cc-overlay.log"),
+                    DateTime.Now.ToString("HH:mm:ss.fff") + " " + text + Environment.NewLine);
+            }
+            catch { }
+        }
+
+        public static string LastError { get { return _lastError; } }
+        public static bool Created { get { return _form != null; } }
+        public static string Bounds
+        {
+            get
+            {
+                try
+                {
+                    OverlayForm form = _form;
+                    if (form == null) return "";
+                    return string.Format("{0},{1} {2}x{3}", form.Left, form.Top, form.Width, form.Height);
+                }
+                catch { return ""; }
+            }
+        }
+        public static bool Visible
+        {
+            get
+            {
+                try
+                {
+                    OverlayForm form = _form;
+                    return form != null && form.Visible;
+                }
+                catch { return false; }
+            }
+        }
+
+        public static void Ensure()
+        {
+            if (_thread != null) return;
+            lock (Sync)
+            {
+                if (_thread != null) return;
+                Log("ensure start");
+                ManualResetEvent ready = new ManualResetEvent(false);
+                _thread = new Thread(delegate()
+                {
+                    try
+                    {
+                        Application.EnableVisualStyles();
+                        _form = new OverlayForm();
+                        IntPtr handle = _form.Handle;
+                        Log("form created hwnd=" + handle);
+                        ready.Set();
+                        Application.Run(_form);
+                        Log("message loop exited");
+                    }
+                    catch (Exception ex)
+                    {
+                        _lastError = ex.ToString();
+                        Log("form failed: " + ex);
+                        ready.Set();
+                    }
+                });
+                _thread.IsBackground = true;
+                _thread.SetApartmentState(ApartmentState.STA);
+                _thread.Start();
+                ready.WaitOne(4000);
+                Thread.Sleep(60);
+                Log("ensure done created=" + (_form != null));
+            }
+        }
+
+        public static void Configure(bool enabled, string position, int x, int y, bool locked)
+        {
+            Ensure();
+            Run(delegate { if (_form != null) _form.Configure(enabled, position, x, y, locked); });
+        }
+
+        public static void State(string mode, string label, int step, int delayHideMs)
+        {
+            Ensure();
+            Run(delegate { if (_form != null) _form.UpdateState(mode, label, step, delayHideMs); });
+        }
+
+        public static void Preview(int durationMs)
+        {
+            Ensure();
+            Run(delegate { if (_form != null) _form.Preview(durationMs); });
+        }
+
+        private static void Run(Action action)
+        {
+            try
+            {
+                OverlayForm form = _form;
+                if (form == null) return;
+                if (form.InvokeRequired) form.BeginInvoke(action);
+                else action();
+            }
+            catch { }
+        }
+
+        internal static void Raise(string name)
+        {
+            Raise(name, null);
+        }
+
+        internal static void Raise(string name, Dictionary<string, object> data)
+        {
+            Action<string, Dictionary<string, object>> handler = Event;
+            if (handler != null) handler(name, data);
+        }
+    }
+
+    internal sealed class OverlayForm : Form
+    {
+        [DllImport("user32.dll")]
+        private static extern bool SetWindowDisplayAffinity(IntPtr hwnd, uint affinity);
+
+        private readonly Label _status;
+        private readonly Label _stop;
+        private readonly Label _lock;
+        private readonly System.Windows.Forms.Timer _hideTimer;
+        private readonly System.Windows.Forms.Timer _previewTimer;
+        private bool _locked;
+        private bool _enabled = true;
+        private string _mode = "idle";
+        private string _label = "待机";
+        private int _step;
+        private string _position = "top-center";
+        private int _customX;
+        private int _customY;
+        private bool _dragging;
+        private Point _dragStart;
+        private Point _windowStart;
+
+        public OverlayForm()
+        {
+            Text = "computer control";
+            FormBorderStyle = FormBorderStyle.None;
+            ShowInTaskbar = false;
+            TopMost = true;
+            StartPosition = FormStartPosition.Manual;
+            Size = new Size(380, 46);
+            BackColor = Color.FromArgb(20, 22, 26);
+            DoubleBuffered = true;
+            Font = new Font("Microsoft YaHei UI", 9f);
+
+            _status = MakeText("待机", Color.White, ContentAlignment.MiddleLeft);
+            _stop = MakeText("停止", Color.FromArgb(255, 128, 128), ContentAlignment.MiddleCenter);
+            _lock = MakeText("锁", Color.FromArgb(180, 190, 210), ContentAlignment.MiddleCenter);
+
+            _stop.Cursor = Cursors.Hand;
+            _stop.Click += delegate { Overlay.Raise("overlay.stop"); };
+            _lock.Cursor = Cursors.Hand;
+            _lock.Click += delegate { ToggleLock(); };
+
+            _status.MouseDown += DragDown;
+            _status.MouseMove += DragMove;
+            _status.MouseUp += DragUp;
+            MouseDown += DragDown;
+            MouseMove += DragMove;
+            MouseUp += DragUp;
+
+            _hideTimer = new System.Windows.Forms.Timer();
+            _hideTimer.Interval = 2000;
+            _hideTimer.Tick += delegate { _hideTimer.Stop(); Hide(); };
+
+            // 预览时临时允许截屏，方便在设置页里看清样式；结束后恢复「排除截屏」。
+            _previewTimer = new System.Windows.Forms.Timer();
+            _previewTimer.Tick += delegate
+            {
+                _previewTimer.Stop();
+                SetCaptureVisible(false);
+                if (_mode == "idle") Hide();
+                else UpdateState(_mode, _label, _step, 2000);
+            };
+
+            Region = RoundedRegion(Size, 23);
+            ApplyLayout();
+            SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint, true);
+        }
+
+        protected override bool ShowWithoutActivation
+        {
+            get { return true; }
+        }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                CreateParams cp = base.CreateParams;
+                cp.ExStyle |= 0x08000000; // WS_EX_NOACTIVATE
+                cp.ExStyle |= 0x00000080; // WS_EX_TOOLWINDOW
+                return cp;
+            }
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            SetCaptureVisible(false);
+        }
+
+        private void SetCaptureVisible(bool allow)
+        {
+            try { SetWindowDisplayAffinity(Handle, allow ? 0u : 0x11u); }
+            catch
+            {
+                if (allow) return;
+                try { SetWindowDisplayAffinity(Handle, 0x01); } catch { }
+            }
+        }
+
+        public void Preview(int durationMs)
+        {
+            _hideTimer.Stop();
+            _status.Text = "预览 · computer control";
+            Invalidate();
+            ShowIsland();
+            SetCaptureVisible(true);
+            _previewTimer.Stop();
+            _previewTimer.Interval = Math.Max(800, Math.Min(30000, durationMs));
+            _previewTimer.Start();
+        }
+
+        private Label MakeText(string text, Color color, ContentAlignment align)
+        {
+            Label label = new Label();
+            label.Text = text;
+            label.ForeColor = color;
+            label.BackColor = Color.Transparent;
+            label.AutoSize = false;
+            label.TextAlign = align;
+            label.Font = new Font("Microsoft YaHei UI", 9f);
+            label.Cursor = Cursors.SizeAll;
+            Controls.Add(label);
+            return label;
+        }
+
+        private void ApplyLayout()
+        {
+            _stop.Bounds = new Rectangle(Width - 104, 4, 50, 38);
+            _lock.Bounds = new Rectangle(Width - 52, 4, 44, 38);
+            _status.Bounds = new Rectangle(34, 0, Width - 148, Height);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            Color dot = _mode == "control"
+                ? Color.FromArgb(77, 107, 254)
+                : _mode == "watch"
+                    ? Color.FromArgb(34, 197, 94)
+                    : Color.FromArgb(148, 163, 184);
+            using (SolidBrush brush = new SolidBrush(dot))
+                e.Graphics.FillEllipse(brush, 14, Height / 2 - 5, 10, 10);
+            using (Pen pen = new Pen(Color.FromArgb(70, 255, 255, 255)))
+                e.Graphics.DrawLine(pen, Width - 112, 10, Width - 112, Height - 10);
+        }
+
+        public void Configure(bool enabled, string position, int x, int y, bool locked)
+        {
+            _enabled = enabled;
+            _position = string.IsNullOrEmpty(position) ? "top-center" : position;
+            _customX = x;
+            _customY = y;
+            _locked = locked;
+            _lock.Text = _locked ? "解锁" : "锁";
+            _lock.Cursor = _locked ? Cursors.Default : Cursors.Hand;
+            if (!_enabled)
+            {
+                _hideTimer.Stop();
+                Hide();
+                return;
+            }
+            ApplyPosition();
+            if (_mode != "idle") ShowIsland();
+        }
+
+        private void ApplyPosition()
+        {
+            Rectangle wa = Screen.PrimaryScreen.WorkingArea;
+            int left;
+            int top;
+            if (_position == "custom")
+            {
+                left = _customX;
+                top = _customY;
+            }
+            else if (_position == "top-left")
+            {
+                left = wa.X + 12;
+                top = wa.Y + 8;
+            }
+            else if (_position == "top-right")
+            {
+                left = wa.Right - Width - 12;
+                top = wa.Y + 8;
+            }
+            else
+            {
+                left = wa.X + (wa.Width - Width) / 2;
+                top = wa.Y + 8;
+            }
+            Location = new Point(left, top);
+        }
+
+        public void UpdateState(string mode, string label, int step, int delayHideMs)
+        {
+            _mode = string.IsNullOrEmpty(mode) ? "idle" : mode;
+            _label = string.IsNullOrEmpty(label) ? "待机" : label;
+            _step = step;
+            _status.Text = _mode == "idle" ? _label : (_step > 0 ? _label + " · 第 " + _step + " 步" : _label);
+            Invalidate();
+            if (!_enabled) return;
+            _hideTimer.Stop();
+            if (_mode == "idle")
+            {
+                _hideTimer.Interval = Math.Max(200, Math.Min(60000, delayHideMs));
+                _hideTimer.Start();
+            }
+            else
+            {
+                ShowIsland();
+            }
+        }
+
+        private void ShowIsland()
+        {
+            if (!Visible) Show();
+            TopMost = true;
+        }
+
+        private void ToggleLock()
+        {
+            _locked = !_locked;
+            _lock.Text = _locked ? "解锁" : "锁";
+            _lock.Cursor = _locked ? Cursors.Default : Cursors.Hand;
+            Dictionary<string, object> data = new Dictionary<string, object>();
+            data["locked"] = _locked;
+            Overlay.Raise("overlay.locked", data);
+        }
+
+        private void DragDown(object sender, MouseEventArgs e)
+        {
+            if (_locked || e.Button != MouseButtons.Left) return;
+            _dragging = true;
+            _dragStart = Cursor.Position;
+            _windowStart = Location;
+        }
+
+        private void DragMove(object sender, MouseEventArgs e)
+        {
+            if (!_dragging || _locked) return;
+            Point now = Cursor.Position;
+            Location = new Point(_windowStart.X + (now.X - _dragStart.X), _windowStart.Y + (now.Y - _dragStart.Y));
+        }
+
+        private void DragUp(object sender, MouseEventArgs e)
+        {
+            if (!_dragging) return;
+            _dragging = false;
+            _position = "custom";
+            _customX = Left;
+            _customY = Top;
+            Dictionary<string, object> data = new Dictionary<string, object>();
+            data["x"] = Left;
+            data["y"] = Top;
+            Overlay.Raise("overlay.moved", data);
+        }
+
+        private static Region RoundedRegion(Size size, int radius)
+        {
+            GraphicsPath path = new GraphicsPath();
+            int d = radius * 2;
+            path.AddArc(0, 0, d, d, 180, 90);
+            path.AddArc(size.Width - d, 0, d, d, 270, 90);
+            path.AddArc(size.Width - d, size.Height - d, d, d, 0, 90);
+            path.AddArc(0, size.Height - d, d, d, 90, 90);
+            path.CloseFigure();
+            return new Region(path);
+        }
+    }
+
     internal sealed class Server
     {
         private readonly JavaScriptSerializer _json = new JavaScriptSerializer();
@@ -423,6 +825,7 @@ namespace ComputerControl
             try { Native.SetProcessDpiAwarenessContext(new IntPtr(-4)); }
             catch { try { Native.SetProcessDPIAware(); } catch { } }
             InputLog.Install();
+            Overlay.Event = EmitEvent;
 
             StreamReader reader = new StreamReader(Console.OpenStandardInput(), Encoding.UTF8);
             string line;
@@ -467,6 +870,21 @@ namespace ComputerControl
             }
         }
 
+        /** 悬浮窗发来的事件（停止、拖动、锁定），没有 id，上层按 event 字段处理。 */
+        private void EmitEvent(string name, Dictionary<string, object> data)
+        {
+            Dictionary<string, object> ev = new Dictionary<string, object>();
+            ev["event"] = name;
+            if (data != null)
+                foreach (KeyValuePair<string, object> pair in data) ev[pair.Key] = pair.Value;
+            string text = _json.Serialize(ev);
+            lock (_outGate)
+            {
+                Console.Out.WriteLine(text);
+                Console.Out.Flush();
+            }
+        }
+
         private object Dispatch(string cmd, Dictionary<string, object> args)
         {
             if (cmd == null) throw new InvalidOperationException("缺少 cmd");
@@ -493,6 +911,10 @@ namespace ComputerControl
                 case "learn.start": return LearnStart(args);
                 case "learn.stop": return LearnStop();
                 case "learn.status": return LearnStatus();
+                case "overlay.config": return OverlayConfigure(args);
+                case "overlay.state": return OverlayState(args);
+                case "overlay.preview": return OverlayPreview(args);
+                case "overlay.status": return OverlayStatus();
                 case "shutdown": StopWatch(); return new Dictionary<string, object> { { "bye", true } };
                 default: throw new InvalidOperationException("未知命令：" + cmd);
             }
@@ -1676,8 +2098,7 @@ namespace ComputerControl
             return res;
         }
 
-        private object LearnStop()
-        {
+        private object LearnStop()        {
             InputLog.Learning = false;
             DateTime end = DateTime.Now;
             List<Dictionary<string, object>> events = InputLog.SessionCopy();
@@ -1740,6 +2161,59 @@ namespace ComputerControl
                 _watcherStartedByLearn = false;
             }
             return summary;
+        }
+
+        private object OverlayConfigure(Dictionary<string, object> a)
+        {
+            bool enabled = Bool(a, "enabled", true);
+            string position = Str(a, "position");
+            if (string.IsNullOrEmpty(position)) position = "top-center";
+            bool locked = Bool(a, "locked", false);
+            int x = Int(a, "x", 0);
+            int y = Int(a, "y", 0);
+            Overlay.Configure(enabled, position, x, y, locked);
+            Dictionary<string, object> res = new Dictionary<string, object>();
+            res["enabled"] = enabled;
+            res["position"] = position;
+            res["locked"] = locked;
+            res["created"] = Overlay.Created;
+            if (Overlay.LastError != null) res["lastError"] = Overlay.LastError;
+            return res;
+        }
+
+        private object OverlayPreview(Dictionary<string, object> a)
+        {
+            int durationMs = Int(a, "durationMs", 5000);
+            Overlay.Preview(durationMs);
+            Dictionary<string, object> res = new Dictionary<string, object>();
+            res["previewing"] = true;
+            res["durationMs"] = durationMs;
+            return res;
+        }
+
+        private object OverlayStatus(){
+            Dictionary<string, object> res = new Dictionary<string, object>();
+            res["created"] = Overlay.Created;
+            res["visible"] = Overlay.Visible;
+            res["bounds"] = Overlay.Bounds;
+            if (Overlay.LastError != null) res["lastError"] = Overlay.LastError;
+            return res;
+        }
+
+        private object OverlayState(Dictionary<string, object> a)
+        {
+            string mode = Str(a, "mode");
+            if (string.IsNullOrEmpty(mode)) mode = "idle";
+            string label = Str(a, "label");
+            if (string.IsNullOrEmpty(label)) label = "待机";
+            int step = Int(a, "step", 0);
+            int delay = Int(a, "delayHideMs", 2000);
+            Overlay.State(mode, label, step, delay);
+            Dictionary<string, object> res = new Dictionary<string, object>();
+            res["mode"] = mode;
+            res["label"] = label;
+            res["step"] = step;
+            return res;
         }
 
         private static string EventLine(Dictionary<string, object> ev)
