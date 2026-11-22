@@ -497,10 +497,10 @@ namespace ComputerControl
             }
         }
 
-        public static void Configure(bool enabled, string position, int x, int y, bool locked)
+        public static void Configure(bool enabled, string position, int x, int y, bool locked, int width)
         {
             Ensure();
-            Run(delegate { if (_form != null) _form.Configure(enabled, position, x, y, locked); });
+            Run(delegate { if (_form != null) _form.Configure(enabled, position, x, y, locked, width); });
         }
 
         public static void State(string mode, string label, string action, int delayHideMs)
@@ -584,7 +584,14 @@ namespace ComputerControl
         private bool _dodged;
         private int _animCenterX;
         private int _animCenterY;
-        private const int FullWidth = 460;
+        private readonly Panel _gripLeft;
+        private readonly Panel _gripRight;
+        private bool _resizing;
+        private bool _resizeFromLeft;
+        private int _resizeStartX;
+        private int _resizeStartWidth;
+        private int _resizeCenterX;
+        private int _fullWidth = 460;
         private const int FullHeight = 62;
 
         public OverlayForm()
@@ -611,6 +618,10 @@ namespace ComputerControl
             _close = MakeText("×", Color.FromArgb(170, 180, 195), ContentAlignment.MiddleCenter);
             _close.Font = new Font("Segoe UI", 12f, FontStyle.Bold);
             _close.Cursor = Cursors.Hand;
+
+            // 左右两条拖动条：开锁时可拖动调宽，中心对称
+            _gripLeft = MakeGrip();
+            _gripRight = MakeGrip();
 
             _stop.Cursor = Cursors.Hand;
             _stop.Click += delegate { if (Injected()) return; Overlay.Raise("overlay.stop"); };
@@ -726,6 +737,11 @@ namespace ComputerControl
 
         private void ApplyLayout()
         {
+            _gripLeft.Bounds = new Rectangle(0, 6, 8, Math.Max(10, Height - 12));
+            _gripRight.Bounds = new Rectangle(Width - 8, 6, 8, Math.Max(10, Height - 12));
+            _gripLeft.Visible = !_locked;
+            _gripRight.Visible = !_locked;
+
             if (_locked)
             {
                 // 锁定：藏掉 ×（不能关、不能拖），只留停止和锁
@@ -762,7 +778,7 @@ namespace ComputerControl
                 e.Graphics.DrawLine(pen, Width - 124, 12, Width - 124, Height - 12);
         }
 
-        public void Configure(bool enabled, string position, int x, int y, bool locked)
+        public void Configure(bool enabled, string position, int x, int y, bool locked, int width)
         {
             _enabled = enabled;
             _position = string.IsNullOrEmpty(position) ? "top-center" : position;
@@ -771,6 +787,19 @@ namespace ComputerControl
             _locked = locked;
             _lock.Locked = _locked;
             _lock.Cursor = _locked ? Cursors.Default : Cursors.Hand;
+
+            int targetWidth = Math.Max(300, Math.Min(900, width <= 0 ? _fullWidth : width));
+            if (targetWidth != _fullWidth)
+            {
+                int centerX = Left + Width / 2;
+                _fullWidth = targetWidth;
+                Size = new Size(_fullWidth, FullHeight);
+                if (Visible)
+                {
+                    Left = centerX - _fullWidth / 2;
+                    Region = RoundedRegion(Size, 23);
+                }
+            }
             ApplyLayout();
             if (!_enabled)
             {
@@ -875,7 +904,7 @@ namespace ComputerControl
         {
             if (!_enabled || _dodged) return;
             HideControls(true);
-            Size = new Size(FullWidth, FullHeight);
+            Size = new Size(_fullWidth, FullHeight);
             ApplyPosition();
             _animCenterX = Left + Width / 2;
             _animCenterY = Top + Height / 2;
@@ -897,7 +926,7 @@ namespace ComputerControl
                 _opening = false;
                 _closing = false;
                 base.Hide();
-                Size = new Size(FullWidth, FullHeight);
+                Size = new Size(_fullWidth, FullHeight);
                 Opacity = 1;
                 return;
             }
@@ -926,7 +955,7 @@ namespace ComputerControl
                 else if (t < 320)
                 {
                     double k = (t - 150) / 170.0;
-                    int width = (int)Math.Round(62 + (FullWidth - 62) * Ease(k));
+                    int width = (int)Math.Round(62 + (_fullWidth - 62) * Ease(k));
                     SetAnimatedBounds(_animCenterX, _animCenterY, width, FullHeight, 1);
                 }
                 else
@@ -941,7 +970,7 @@ namespace ComputerControl
                 if (t < 170)
                 {
                     double k = t / 170.0;
-                    int width = (int)Math.Round(FullWidth - (FullWidth - 62) * Ease(k));
+                    int width = (int)Math.Round(_fullWidth - (_fullWidth - 62) * Ease(k));
                     SetAnimatedBounds(_animCenterX, _animCenterY, width, FullHeight, 1);
                 }
                 else if (t < 320)
@@ -955,7 +984,7 @@ namespace ComputerControl
                     _animTimer.Stop();
                     _closing = false;
                     base.Hide();
-                    Size = new Size(FullWidth, FullHeight);
+                    Size = new Size(_fullWidth, FullHeight);
                     Opacity = 1;
                 }
             }
@@ -963,7 +992,7 @@ namespace ComputerControl
 
         private void FinishOpen()
         {
-            Size = new Size(FullWidth, FullHeight);
+            Size = new Size(_fullWidth, FullHeight);
             Left = _animCenterX - Width / 2;
             Top = _animCenterY - Height / 2;
             Region = RoundedRegion(Size, 23);
@@ -989,6 +1018,59 @@ namespace ComputerControl
             _stop.Visible = !hidden;
             _lock.Visible = !hidden;
             _close.Visible = !hidden;
+            _gripLeft.Visible = !hidden && !_locked;
+            _gripRight.Visible = !hidden && !_locked;
+        }
+
+        private Panel MakeGrip()
+        {
+            Panel grip = new Panel();
+            grip.Cursor = Cursors.SizeWE;
+            grip.BackColor = Color.Transparent;
+            grip.MouseDown += ResizeDown;
+            grip.MouseMove += ResizeMove;
+            grip.MouseUp += ResizeUp;
+            Controls.Add(grip);
+            return grip;
+        }
+
+        private void ResizeDown(object sender, MouseEventArgs e)
+        {
+            if (_locked || e.Button != MouseButtons.Left || Injected()) return;
+            _resizing = true;
+            _resizeFromLeft = ReferenceEquals(sender, _gripLeft);
+            _resizeStartX = Cursor.Position.X;
+            _resizeStartWidth = Width;
+            _resizeCenterX = Left + Width / 2;
+            Control control = sender as Control;
+            if (control != null) control.Capture = true;
+        }
+
+        private void ResizeMove(object sender, MouseEventArgs e)
+        {
+            if (!_resizing) return;
+            int dx = Cursor.Position.X - _resizeStartX;
+            int delta = _resizeFromLeft ? -dx : dx;
+            int newWidth = Math.Max(300, Math.Min(900, _resizeStartWidth + delta * 2));
+            if (newWidth == Width) return;
+            Width = newWidth;
+            Left = _resizeCenterX - Width / 2;
+            Region = RoundedRegion(Size, Math.Min(31, Height / 2));
+            ApplyLayout();
+        }
+
+        private void ResizeUp(object sender, MouseEventArgs e)
+        {
+            if (!_resizing) return;
+            _resizing = false;
+            Control control = sender as Control;
+            if (control != null) control.Capture = false;
+            _fullWidth = Width;
+            Dictionary<string, object> data = new Dictionary<string, object>();
+            data["width"] = Width;
+            data["x"] = Left;
+            data["y"] = Top;
+            Overlay.Raise("overlay.resized", data);
         }
 
         private static double Ease(double k)
@@ -1014,7 +1096,7 @@ namespace ComputerControl
             _closing = false;
             _hideTimer.Stop();
             base.Hide();
-            Size = new Size(FullWidth, FullHeight);
+            Size = new Size(_fullWidth, FullHeight);
             Opacity = 1;
             _dodgeTimer.Stop();
             _dodgeTimer.Interval = Math.Max(400, holdMs);
@@ -2543,11 +2625,13 @@ namespace ComputerControl
             bool locked = Bool(a, "locked", false);
             int x = Int(a, "x", 0);
             int y = Int(a, "y", 0);
-            Overlay.Configure(enabled, position, x, y, locked);
+            int width = Int(a, "width", 460);
+            Overlay.Configure(enabled, position, x, y, locked, width);
             Dictionary<string, object> res = new Dictionary<string, object>();
             res["enabled"] = enabled;
             res["position"] = position;
             res["locked"] = locked;
+            res["width"] = Math.Max(300, Math.Min(900, width));
             res["created"] = Overlay.Created;
             if (Overlay.LastError != null) res["lastError"] = Overlay.LastError;
             return res;
