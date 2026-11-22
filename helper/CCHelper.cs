@@ -182,6 +182,35 @@ namespace ComputerControl
         private static int _moveX;
         private static int _moveY;
         private static bool _moveValid;
+        private static readonly List<KeyValuePair<int, int>> _shake = new List<KeyValuePair<int, int>>();
+        private static int _shakeLastRaiseMs;
+
+        /** 左右来回甩鼠标：1 秒内方向反转 ≥4 次且跨度 ≥120px，就发一次暂停事件。 */
+        private static void FeedShake(int x, int t)
+        {
+            _shake.Add(new KeyValuePair<int, int>(x, t));
+            while (_shake.Count > 0 && t - _shake[0].Value > 1000) _shake.RemoveAt(0);
+            if (_shake.Count < 6) return;
+            if (t - _shakeLastRaiseMs < 2500) return;
+
+            int reversals = 0;
+            int dir = 0;
+            int minX = x, maxX = x;
+            for (int i = 1; i < _shake.Count; i++)
+            {
+                int dx = _shake[i].Key - _shake[i - 1].Key;
+                if (dx < -6) { if (dir > 0) reversals++; dir = -1; }
+                else if (dx > 6) { if (dir < 0) reversals++; dir = 1; }
+                if (_shake[i].Key < minX) minX = _shake[i].Key;
+                if (_shake[i].Key > maxX) maxX = _shake[i].Key;
+            }
+            if (reversals >= 4 && maxX - minX >= 120)
+            {
+                _shakeLastRaiseMs = t;
+                _shake.Clear();
+                Overlay.Raise("overlay.shake");
+            }
+        }
 
         /** 我们自己移动光标后登记一下，免得被当成用户在动鼠标。 */
         public static void NoteCursorMove(int x, int y)
@@ -209,6 +238,7 @@ namespace ComputerControl
                         LastUserTick = Environment.TickCount;
                         _moveX = cur.X;
                         _moveY = cur.Y;
+                        FeedShake(cur.X, Environment.TickCount);
                     }
                 }
                 catch { }
@@ -560,10 +590,10 @@ namespace ComputerControl
             Run(delegate { if (_form != null) _form.Configure(enabled, position, x, y, locked, width, opacity); });
         }
 
-        public static void State(string mode, string label, string action, int delayHideMs, bool userPriority)
+        public static void State(string mode, string label, string action, int delayHideMs, bool userPriority, bool paused)
         {
             Ensure();
-            Run(delegate { if (_form != null) _form.UpdateState(mode, label, action, delayHideMs, userPriority); });
+            Run(delegate { if (_form != null) _form.UpdateState(mode, label, action, delayHideMs, userPriority, paused); });
         }
 
         public static void Preview(int durationMs)
@@ -623,6 +653,7 @@ namespace ComputerControl
         private readonly Label _status;
         private readonly Label _focus;
         private readonly Label _stop;
+        private readonly Label _pause;
         private readonly LockGlyph _lock;
         private readonly Label _close;
         private readonly System.Windows.Forms.Timer _hideTimer;
@@ -636,6 +667,7 @@ namespace ComputerControl
         private string _label = "待机";
         private string _action = "";
         private bool _userPriority = true;
+        private bool _paused;
         private string _position = "top-center";
         private int _customX;
         private int _customY;
@@ -681,6 +713,9 @@ namespace ComputerControl
             _focus.Font = new Font("Microsoft YaHei UI", 8.5f);
             _focus.AutoEllipsis = true;
             _stop = MakeText("停止", Color.FromArgb(255, 128, 128), ContentAlignment.MiddleCenter);
+            _pause = MakeText("暂停", Color.FromArgb(255, 196, 80), ContentAlignment.MiddleCenter);
+            _pause.Font = new Font("Microsoft YaHei UI", 8.5f);
+            _pause.Cursor = Cursors.Hand;
             _lock = new LockGlyph();
             Controls.Add(_lock);
             _close = MakeText("×", Color.FromArgb(170, 180, 195), ContentAlignment.MiddleCenter);
@@ -693,6 +728,7 @@ namespace ComputerControl
 
             _stop.Cursor = Cursors.Hand;
             _stop.Click += delegate { if (Injected()) return; Overlay.Raise("overlay.stop"); };
+            _pause.Click += delegate { if (Injected()) return; TogglePause(); };
             _lock.Click += delegate { if (Injected()) return; ToggleLock(); };
             _close.Click += delegate { if (Injected()) return; Overlay.Raise("overlay.close"); };
 
@@ -732,7 +768,7 @@ namespace ComputerControl
                 _previewTimer.Stop();
                 SetCaptureVisible(false);
                 if (_mode == "idle") HideIsland(true);
-                else UpdateState(_mode, _label, _action, 2000, _userPriority);
+                else UpdateState(_mode, _label, _action, 2000, _userPriority, _paused);
             };
 
             // 临时状态提示：比如「让开中：检测到你在操作」，过几秒自动恢复
@@ -822,12 +858,13 @@ namespace ComputerControl
 
             if (_locked)
             {
-                // 锁定：藏掉 ×（不能关、不能拖），只留停止和锁
+                // 锁定：藏掉 ×（不能关、不能拖），只留暂停、停止和锁
                 _close.Visible = false;
                 _lock.Bounds = new Rectangle(Width - 40, 12, 30, 38);
                 _stop.Bounds = new Rectangle(Width - 96, 12, 50, 38);
-                _status.Bounds = new Rectangle(34, 4, Width - 130, 28);
-                _focus.Bounds = new Rectangle(34, 30, Width - 130, 28);
+                _pause.Bounds = new Rectangle(Width - 144, 12, 40, 38);
+                _status.Bounds = new Rectangle(34, 4, Width - 186, 28);
+                _focus.Bounds = new Rectangle(34, 30, Width - 186, 28);
                 _status.Cursor = Cursors.Default;
             }
             else
@@ -836,8 +873,9 @@ namespace ComputerControl
                 _close.Bounds = new Rectangle(Width - 34, 12, 26, 38);
                 _lock.Bounds = new Rectangle(Width - 66, 12, 30, 38);
                 _stop.Bounds = new Rectangle(Width - 118, 12, 50, 38);
-                _status.Bounds = new Rectangle(34, 4, Width - 152, 28);
-                _focus.Bounds = new Rectangle(34, 30, Width - 152, 28);
+                _pause.Bounds = new Rectangle(Width - 166, 12, 40, 38);
+                _status.Bounds = new Rectangle(34, 4, Width - 208, 28);
+                _focus.Bounds = new Rectangle(34, 30, Width - 208, 28);
                 _status.Cursor = Cursors.SizeAll;
             }
         }
@@ -924,13 +962,14 @@ namespace ComputerControl
             get { return _status.Text; }
         }
 
-        public void UpdateState(string mode, string label, string action, int delayHideMs, bool userPriority)
+        public void UpdateState(string mode, string label, string action, int delayHideMs, bool userPriority, bool paused)
         {
             _mode = string.IsNullOrEmpty(mode) ? "idle" : mode;
             _label = string.IsNullOrEmpty(label) ? "待机" : label;
             _action = action ?? "";
             _userPriority = userPriority;
-            UpdateStatusText();
+            _paused = paused;
+            ApplyPause();
             if (_mode == "idle") _focus.Text = "";
             else UpdateFocus();
             Invalidate();
@@ -954,9 +993,29 @@ namespace ComputerControl
                 _status.Text = _alertText;
                 return;
             }
+            if (_paused && _mode != "idle")
+            {
+                _status.Text = "已暂停 · 点「继续」恢复操控";
+                return;
+            }
             _status.Text = _mode == "idle"
                 ? _label
                 : _label + (string.IsNullOrEmpty(_action) ? "" : " · " + _action);
+        }
+
+        private void TogglePause()
+        {
+            _paused = !_paused;
+            ApplyPause();
+            Dictionary<string, object> data = new Dictionary<string, object>();
+            data["paused"] = _paused;
+            Overlay.Raise("overlay.pause", data);
+        }
+
+        private void ApplyPause()
+        {
+            _pause.Text = _paused ? "继续" : "暂停";
+            UpdateStatusText();
         }
 
         /** 临时改第一行文字（用户抢鼠标时显示「让开中」之类），到点自动恢复。 */
@@ -1117,6 +1176,7 @@ namespace ComputerControl
             _status.Visible = !hidden;
             _focus.Visible = !hidden;
             _stop.Visible = !hidden;
+            _pause.Visible = !hidden;
             _lock.Visible = !hidden;
             _close.Visible = !hidden;
             _gripLeft.Visible = !hidden && !_locked;
@@ -2161,7 +2221,7 @@ namespace ComputerControl
                         {
                             Send(MouseInput(up, 0, 0, 0));
                             released = true;
-                            throw new InvalidOperationException("USER_BUSY: 拖动时你接管了鼠标，我已经松开。");
+                            throw new InvalidOperationException("USER_BUSY: 拖动时你接管了鼠标（在 (" + cur.X + ", " + cur.Y + ")，第 " + i + "/" + steps + " 步），我已经松开。");
                         }
                     }
                     int nx = x + (x2 - x) * i / steps;
@@ -2912,13 +2972,15 @@ namespace ComputerControl
             string action = Str(a, "action");
             if (action == null) action = "";
             bool userPriority = Bool(a, "userPriority", true);
+            bool paused = Bool(a, "paused", false);
             int delay = Int(a, "delayHideMs", 2000);
-            Overlay.State(mode, label, action, delay, userPriority);
+            Overlay.State(mode, label, action, delay, userPriority, paused);
             Dictionary<string, object> res = new Dictionary<string, object>();
             res["mode"] = mode;
             res["label"] = label;
             res["action"] = action;
             res["userPriority"] = userPriority;
+            res["paused"] = paused;
             return res;
         }
 
