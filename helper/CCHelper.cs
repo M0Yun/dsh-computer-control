@@ -751,7 +751,7 @@ namespace ComputerControl
             _pause = MakeText("暂停", Color.FromArgb(255, 196, 80), ContentAlignment.MiddleCenter);
             _pause.Cursor = Cursors.Hand;
 
-            _drawer = MakeText("聊", Color.FromArgb(150, 190, 255), ContentAlignment.MiddleCenter);
+            _drawer = MakeText("聊天", Color.FromArgb(150, 190, 255), ContentAlignment.MiddleCenter);
             _drawer.Cursor = Cursors.Hand;
             _drawer.Click += delegate { if (Injected()) return; ToggleDrawer(); };
 
@@ -945,9 +945,9 @@ namespace ComputerControl
                 _lock.Bounds = new Rectangle(Width - 40, 12, 30, 38);
                 _stop.Bounds = new Rectangle(Width - 96, 12, 50, 38);
                 _pause.Bounds = new Rectangle(Width - 154, 12, 50, 38);
-                _drawer.Bounds = new Rectangle(Width - 204, 12, 40, 38);
-                _status.Bounds = new Rectangle(34, 4, Width - (watchMode ? 238 : 196), 28);
-                _focus.Bounds = new Rectangle(34, 30, Width - (watchMode ? 238 : 196), 28);
+                _drawer.Bounds = new Rectangle(Width - 214, 12, 50, 38);
+                _status.Bounds = new Rectangle(34, 4, Width - (watchMode ? 256 : 196), 28);
+                _focus.Bounds = new Rectangle(34, 30, Width - (watchMode ? 256 : 196), 28);
                 _status.Cursor = Cursors.Default;
             }
             else
@@ -957,9 +957,9 @@ namespace ComputerControl
                 _lock.Bounds = new Rectangle(Width - 66, 12, 30, 38);
                 _stop.Bounds = new Rectangle(Width - 118, 12, 50, 38);
                 _pause.Bounds = new Rectangle(Width - 176, 12, 50, 38);
-                _drawer.Bounds = new Rectangle(Width - 226, 12, 40, 38);
-                _status.Bounds = new Rectangle(34, 4, Width - (watchMode ? 260 : 220), 28);
-                _focus.Bounds = new Rectangle(34, 30, Width - (watchMode ? 260 : 220), 28);
+                _drawer.Bounds = new Rectangle(Width - 236, 12, 50, 38);
+                _status.Bounds = new Rectangle(34, 4, Width - (watchMode ? 278 : 220), 28);
+                _focus.Bounds = new Rectangle(34, 30, Width - (watchMode ? 278 : 220), 28);
                 _status.Cursor = Cursors.SizeAll;
             }
         }
@@ -1060,6 +1060,7 @@ namespace ComputerControl
             _paused = paused;
             if (_mode != "watch" && _drawerOpen) SetDrawerOpen(false);
             ApplyPause();
+            if (!_animTimer.Enabled) ApplyLayout();
             if (_mode == "idle") _focus.Text = "";
             else UpdateFocus();
             Invalidate();
@@ -1154,7 +1155,7 @@ namespace ComputerControl
                 _chatLog.Bounds = new Rectangle(6, 6, w - 12, _drawerPanel.Height - 58);
                 _chatInput.Bounds = new Rectangle(6, _drawerPanel.Height - 46, w - 118, 38);
                 _chatSend.Bounds = new Rectangle(w - 106, _drawerPanel.Height - 46, 100, 38);
-                _drawer.Text = "收";
+                _drawer.Text = "收起";
                 ApplyLayout();
                 Activate();
                 _chatInput.Focus();
@@ -1162,7 +1163,7 @@ namespace ComputerControl
             else
             {
                 _drawerPanel.Visible = false;
-                _drawer.Text = "聊";
+                _drawer.Text = "聊天";
                 Height = 62;
                 Region = RoundedRegion(Size, 23);
                 SetNoActivate(true);
