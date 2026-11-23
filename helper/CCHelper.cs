@@ -1951,7 +1951,7 @@ namespace ComputerControl
                 }
                 try
                 {
-                    using (Font f = new Font("Segoe UI", 8f, FontStyle.Regular))
+                    using (Font f = new Font("Segoe UI", 18f, FontStyle.Regular))
                     using (SolidBrush br = new SolidBrush(Color.FromArgb(150, 255, 0, 255)))
                     {
                         for (int x = 0; x < bmp.Width; x += 200)
