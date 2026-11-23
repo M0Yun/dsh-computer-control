@@ -51,6 +51,8 @@ namespace ComputerControl
         [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
         [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT point);
         [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr hWnd, uint flags);
+        [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW", SetLastError = true)] public static extern IntPtr GetWindowLongPtr(IntPtr hWnd, int nIndex);
+        [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW", SetLastError = true)] public static extern IntPtr SetWindowLongPtr(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr hWnd, StringBuilder text, int count);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
         [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr hWnd);
@@ -548,6 +550,19 @@ namespace ComputerControl
             }
         }
 
+        public static string ChatText
+        {
+            get
+            {
+                try
+                {
+                    OverlayForm form = _form;
+                    return form == null ? "" : form.ChatText;
+                }
+                catch { return ""; }
+            }
+        }
+
         public static void Ensure()
         {
             if (_thread != null) return;
@@ -609,6 +624,20 @@ namespace ComputerControl
             Run(delegate { if (_form != null) _form.ShowAlert(text, durationMs); });
         }
 
+        /** 往观看抽屉的聊天历史里追加一行。 */
+        public static void ChatLog(string line)
+        {
+            Ensure();
+            Run(delegate { if (_form != null) _form.AppendChat(line); });
+        }
+
+        /** 打开/收起观看抽屉（给设置页或自检用）。 */
+        public static void ToggleDrawer()
+        {
+            Ensure();
+            Run(delegate { if (_form != null) _form.ToggleDrawerPublic(); });
+        }
+
         /** 控制动作的目标点被悬浮岛盖住时，先把悬浮岛藏起来，动作结束再回来。 */
         public static void DodgeIfCovered(int x, int y, int holdMs)
         {
@@ -654,6 +683,12 @@ namespace ComputerControl
         private readonly Label _focus;
         private readonly Label _stop;
         private readonly Label _pause;
+        private readonly Label _drawer;
+        private readonly Panel _drawerPanel;
+        private readonly TextBox _chatLog;
+        private readonly TextBox _chatInput;
+        private readonly Label _chatSend;
+        private bool _drawerOpen;
         private readonly LockGlyph _lock;
         private readonly Label _close;
         private readonly System.Windows.Forms.Timer _hideTimer;
@@ -715,6 +750,52 @@ namespace ComputerControl
             _stop = MakeText("结束", Color.FromArgb(255, 128, 128), ContentAlignment.MiddleCenter);
             _pause = MakeText("暂停", Color.FromArgb(255, 196, 80), ContentAlignment.MiddleCenter);
             _pause.Cursor = Cursors.Hand;
+
+            _drawer = MakeText("聊", Color.FromArgb(150, 190, 255), ContentAlignment.MiddleCenter);
+            _drawer.Cursor = Cursors.Hand;
+            _drawer.Click += delegate { if (Injected()) return; ToggleDrawer(); };
+
+            _drawerPanel = new Panel();
+            _drawerPanel.BackColor = Color.FromArgb(24, 27, 32);
+            _drawerPanel.Visible = false;
+            Controls.Add(_drawerPanel);
+
+            _chatLog = new TextBox();
+            _chatLog.Multiline = true;
+            _chatLog.ReadOnly = true;
+            _chatLog.ScrollBars = ScrollBars.Vertical;
+            _chatLog.BorderStyle = BorderStyle.None;
+            _chatLog.BackColor = Color.FromArgb(16, 18, 22);
+            _chatLog.ForeColor = Color.FromArgb(220, 228, 240);
+            _chatLog.Font = new Font("Microsoft YaHei UI", 9f);
+            _chatLog.WordWrap = true;
+            _drawerPanel.Controls.Add(_chatLog);
+
+            _chatInput = new TextBox();
+            _chatInput.BorderStyle = BorderStyle.None;
+            _chatInput.BackColor = Color.FromArgb(32, 36, 44);
+            _chatInput.ForeColor = Color.White;
+            _chatInput.Font = new Font("Microsoft YaHei UI", 9.5f);
+            _chatInput.KeyDown += delegate (object sender, KeyEventArgs e)
+            {
+                if (e.KeyCode == Keys.Enter)
+                {
+                    e.SuppressKeyPress = true;
+                    SendChat();
+                }
+            };
+            _drawerPanel.Controls.Add(_chatInput);
+
+            _chatSend = new Label();
+            _chatSend.Text = "发送";
+            _chatSend.TextAlign = ContentAlignment.MiddleCenter;
+            _chatSend.BackColor = Color.FromArgb(77, 107, 254);
+            _chatSend.ForeColor = Color.White;
+            _chatSend.Font = new Font("Microsoft YaHei UI", 9f, FontStyle.Bold);
+            _chatSend.Cursor = Cursors.Hand;
+            _chatSend.Click += delegate { if (Injected()) return; SendChat(); };
+            _drawerPanel.Controls.Add(_chatSend);
+
             _lock = new LockGlyph();
             Controls.Add(_lock);
             _close = MakeText("×", Color.FromArgb(170, 180, 195), ContentAlignment.MiddleCenter);
@@ -852,18 +933,21 @@ namespace ComputerControl
         {
             _gripLeft.Bounds = new Rectangle(0, 6, 8, Math.Max(10, Height - 12));
             _gripRight.Bounds = new Rectangle(Width - 8, 6, 8, Math.Max(10, Height - 12));
-            _gripLeft.Visible = !_locked;
-            _gripRight.Visible = !_locked;
+            _gripLeft.Visible = !_locked && !_drawerOpen;
+            _gripRight.Visible = !_locked && !_drawerOpen;
 
+            bool watchMode = _mode == "watch";
+            _drawer.Visible = watchMode;
             if (_locked)
             {
-                // 锁定：藏掉 ×（不能关、不能拖），只留暂停、停止和锁
+                // 锁定：藏掉 ×（不能关、不能拖），只留聊天、暂停、结束和锁
                 _close.Visible = false;
                 _lock.Bounds = new Rectangle(Width - 40, 12, 30, 38);
                 _stop.Bounds = new Rectangle(Width - 96, 12, 50, 38);
                 _pause.Bounds = new Rectangle(Width - 154, 12, 50, 38);
-                _status.Bounds = new Rectangle(34, 4, Width - 196, 28);
-                _focus.Bounds = new Rectangle(34, 30, Width - 196, 28);
+                _drawer.Bounds = new Rectangle(Width - 204, 12, 40, 38);
+                _status.Bounds = new Rectangle(34, 4, Width - (watchMode ? 238 : 196), 28);
+                _focus.Bounds = new Rectangle(34, 30, Width - (watchMode ? 238 : 196), 28);
                 _status.Cursor = Cursors.Default;
             }
             else
@@ -873,8 +957,9 @@ namespace ComputerControl
                 _lock.Bounds = new Rectangle(Width - 66, 12, 30, 38);
                 _stop.Bounds = new Rectangle(Width - 118, 12, 50, 38);
                 _pause.Bounds = new Rectangle(Width - 176, 12, 50, 38);
-                _status.Bounds = new Rectangle(34, 4, Width - 220, 28);
-                _focus.Bounds = new Rectangle(34, 30, Width - 220, 28);
+                _drawer.Bounds = new Rectangle(Width - 226, 12, 40, 38);
+                _status.Bounds = new Rectangle(34, 4, Width - (watchMode ? 260 : 220), 28);
+                _focus.Bounds = new Rectangle(34, 30, Width - (watchMode ? 260 : 220), 28);
                 _status.Cursor = Cursors.SizeAll;
             }
         }
@@ -961,6 +1046,11 @@ namespace ComputerControl
             get { return _status.Text; }
         }
 
+        public string ChatText
+        {
+            get { return _chatLog.Text ?? ""; }
+        }
+
         public void UpdateState(string mode, string label, string action, int delayHideMs, bool userPriority, bool paused)
         {
             _mode = string.IsNullOrEmpty(mode) ? "idle" : mode;
@@ -968,6 +1058,7 @@ namespace ComputerControl
             _action = action ?? "";
             _userPriority = userPriority;
             _paused = paused;
+            if (_mode != "watch" && _drawerOpen) SetDrawerOpen(false);
             ApplyPause();
             if (_mode == "idle") _focus.Text = "";
             else UpdateFocus();
@@ -1015,6 +1106,99 @@ namespace ComputerControl
         {
             _pause.Text = _paused ? "继续" : "暂停";
             UpdateStatusText();
+        }
+
+        private void ToggleDrawer()
+        {
+            if (!_drawerOpen && _mode != "watch") return;
+            SetDrawerOpen(!_drawerOpen);
+            Dictionary<string, object> data = new Dictionary<string, object>();
+            data["open"] = _drawerOpen;
+            Overlay.Raise("overlay.drawer", data);
+        }
+
+        public void ToggleDrawerPublic()
+        {
+            ToggleDrawer();
+        }
+
+        private void SetNoActivate(bool noActivate)
+        {
+            try
+            {
+                long style = Native.GetWindowLongPtr(Handle, -20).ToInt64();
+                if (noActivate) style |= 0x08000000L;
+                else style &= ~0x08000000L;
+                Native.SetWindowLongPtr(Handle, -20, new IntPtr(style));
+            }
+            catch { }
+        }
+
+        private void SetDrawerOpen(bool open)
+        {
+            if (open == _drawerOpen) return;
+            _drawerOpen = open;
+            _hideTimer.Stop();
+            if (open)
+            {
+                if (_mode != "watch") { _drawerOpen = false; return; }
+                _animTimer.Stop();
+                _opening = false;
+                _closing = false;
+                SetNoActivate(false);
+                Height = 400;
+                Region = RoundedRegion(Size, 23);
+                _drawerPanel.Visible = true;
+                _drawerPanel.Bounds = new Rectangle(10, 56, Width - 20, Height - 66);
+                int w = _drawerPanel.Width;
+                _chatLog.Bounds = new Rectangle(6, 6, w - 12, _drawerPanel.Height - 58);
+                _chatInput.Bounds = new Rectangle(6, _drawerPanel.Height - 46, w - 118, 38);
+                _chatSend.Bounds = new Rectangle(w - 106, _drawerPanel.Height - 46, 100, 38);
+                _drawer.Text = "收";
+                ApplyLayout();
+                Activate();
+                _chatInput.Focus();
+            }
+            else
+            {
+                _drawerPanel.Visible = false;
+                _drawer.Text = "聊";
+                Height = 62;
+                Region = RoundedRegion(Size, 23);
+                SetNoActivate(true);
+                ApplyLayout();
+                _hideTimer.Interval = 2000;
+                _hideTimer.Start();
+            }
+        }
+
+        private void SendChat()
+        {
+            string text = _chatInput.Text == null ? "" : _chatInput.Text.Trim();
+            if (text.Length == 0) return;
+            _chatInput.Text = "";
+            AppendChat("你：" + text);
+            Dictionary<string, object> data = new Dictionary<string, object>();
+            data["text"] = text;
+            Overlay.Raise("overlay.chat", data);
+        }
+
+        public void AppendChat(string line)
+        {
+            if (string.IsNullOrEmpty(line)) return;
+            try
+            {
+                string old = _chatLog.Text ?? "";
+                string next = old.Length == 0 ? line : old + "\r\n" + line;
+                if (next.Length > 8000) next = next.Substring(next.Length - 8000);
+                _chatLog.Text = next;
+                if (_chatLog.IsHandleCreated)
+                {
+                    _chatLog.SelectionStart = _chatLog.TextLength;
+                    _chatLog.ScrollToCaret();
+                }
+            }
+            catch { }
         }
 
         /** 临时改第一行文字（用户抢鼠标时显示「让开中」之类），到点自动恢复。 */
@@ -1176,6 +1360,7 @@ namespace ComputerControl
             _focus.Visible = !hidden;
             _stop.Visible = !hidden;
             _pause.Visible = !hidden;
+            _drawer.Visible = !hidden && _mode == "watch";
             _lock.Visible = !hidden;
             _close.Visible = !hidden;
             _gripLeft.Visible = !hidden && !_locked;
@@ -1530,6 +1715,8 @@ namespace ComputerControl
                 case "overlay.state": return OverlayState(args);
                 case "overlay.preview": return OverlayPreview(args);
                 case "overlay.alert": return OverlayAlert(args);
+                case "overlay.chatlog": return OverlayChatLog(args);
+                case "overlay.drawer": Overlay.ToggleDrawer(); return new Dictionary<string, object> { { "ok", true } };
                 case "overlay.status": return OverlayStatus();
                 case "shutdown": StopWatch(); return new Dictionary<string, object> { { "bye", true } };
                 default: throw new InvalidOperationException("未知命令：" + cmd);
@@ -2678,6 +2865,20 @@ namespace ComputerControl
                 }
                 _lastKeptGrid = grid;
                 _lastChangeAt = DateTime.Now;
+
+                // 通知插件层：画面变了（浮窗显示 + 可选解说）
+                try
+                {
+                    Dictionary<string, object> change = new Dictionary<string, object>();
+                    change["ratio"] = frame["ratio"];
+                    change["bbox"] = frame["bbox"];
+                    change["title"] = frame["title"];
+                    change["path"] = path;
+                    change["file"] = frame["file"];
+                    change["t"] = frame["t"];
+                    Overlay.Raise("watch.change", change);
+                }
+                catch { }
             }
         }
 
@@ -2930,6 +3131,16 @@ namespace ComputerControl
             return res;
         }
 
+        private object OverlayChatLog(Dictionary<string, object> a)
+        {
+            string line = Str(a, "line");
+            if (string.IsNullOrEmpty(line)) line = Str(a, "text");
+            if (!string.IsNullOrEmpty(line)) Overlay.ChatLog(line);
+            Dictionary<string, object> res = new Dictionary<string, object>();
+            res["ok"] = true;
+            return res;
+        }
+
         private object OverlayAlert(Dictionary<string, object> a)
         {
             string text = Str(a, "text");
@@ -2958,6 +3169,7 @@ namespace ComputerControl
             res["visible"] = Overlay.Visible;
             res["bounds"] = Overlay.Bounds;
             res["text"] = Overlay.StatusText;
+            res["chat"] = Overlay.ChatText;
             if (Overlay.LastError != null) res["lastError"] = Overlay.LastError;
             return res;
         }
