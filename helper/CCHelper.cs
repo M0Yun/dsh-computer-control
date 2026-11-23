@@ -920,7 +920,8 @@ namespace ComputerControl
             Label label = new Label();
             label.Text = text;
             label.ForeColor = color;
-            label.BackColor = Color.Transparent;
+            // 用胶囊同色而不是透明：透明 Label 在分层不透明度下会在边缘露出一条接缝
+            label.BackColor = BackColor;
             label.AutoSize = false;
             label.TextAlign = align;
             label.Font = new Font("Microsoft YaHei UI", 9f);
