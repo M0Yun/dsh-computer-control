@@ -1878,23 +1878,46 @@ namespace ComputerControl
             return VirtualScreen();
         }
 
+        [DllImport("user32.dll")] private static extern IntPtr GetDC(IntPtr hWnd);
+        [DllImport("user32.dll")] private static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+        [DllImport("gdi32.dll")] private static extern IntPtr CreateCompatibleDC(IntPtr hdc);
+        [DllImport("gdi32.dll")] private static extern IntPtr CreateCompatibleBitmap(IntPtr hdc, int w, int h);
+        [DllImport("gdi32.dll")] private static extern IntPtr SelectObject(IntPtr hdc, IntPtr obj);
+        [DllImport("gdi32.dll")] private static extern bool BitBlt(IntPtr dst, int x, int y, int w, int h, IntPtr src, int sx, int sy, uint rop);
+        [DllImport("gdi32.dll")] private static extern bool DeleteObject(IntPtr obj);
+        [DllImport("gdi32.dll")] private static extern bool DeleteDC(IntPtr hdc);
+
         private static Bitmap Capture(Rectangle r)
         {
             if (r.Width <= 0 || r.Height <= 0) throw new InvalidOperationException("截图区域为空");
-            Bitmap bmp = new Bitmap(r.Width, r.Height, PixelFormat.Format32bppArgb);
+            // 用 GDI BitBlt 而不是 GDI+ CopyFromScreen：后者在观看线程里抓全屏会周期性崩掉进程
+            IntPtr screen = GetDC(IntPtr.Zero);
+            if (screen == IntPtr.Zero) throw new InvalidOperationException("抓屏失败（拿不到屏幕 DC）");
             try
             {
-                using (Graphics g = Graphics.FromImage(bmp))
+                IntPtr mem = CreateCompatibleDC(screen);
+                if (mem == IntPtr.Zero) throw new InvalidOperationException("抓屏失败（DC 创建失败）");
+                try
                 {
-                    g.CopyFromScreen(r.X, r.Y, 0, 0, new Size(r.Width, r.Height), CopyPixelOperation.SourceCopy);
+                    IntPtr hbmp = CreateCompatibleBitmap(screen, r.Width, r.Height);
+                    if (hbmp == IntPtr.Zero) throw new InvalidOperationException("抓屏失败（位图创建失败）");
+                    try
+                    {
+                        IntPtr old = SelectObject(mem, hbmp);
+                        try
+                        {
+                            if (!BitBlt(mem, 0, 0, r.Width, r.Height, screen, r.X, r.Y, 0x00CC0020))
+                                throw new InvalidOperationException("抓屏失败（BitBlt 返回 false）");
+                        }
+                        finally { SelectObject(mem, old); }
+                        using (Bitmap raw = Image.FromHbitmap(hbmp))
+                            return new Bitmap(raw);
+                    }
+                    finally { DeleteObject(hbmp); }
                 }
+                finally { DeleteDC(mem); }
             }
-            catch
-            {
-                bmp.Dispose();
-                throw new InvalidOperationException("抓屏失败（可能处于锁屏或安全桌面）");
-            }
-            return bmp;
+            finally { ReleaseDC(IntPtr.Zero, screen); }
         }
 
         private object Shot(Dictionary<string, object> a)
@@ -2842,13 +2865,24 @@ namespace ComputerControl
             while (_watchRun)
             {
                 try { WatchTick(); }
-                catch { }
+                catch (Exception ex)
+                {
+                    try
+                    {
+                        string path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "cch-watch.log");
+                        System.IO.File.AppendAllText(path, DateTime.Now.ToString("HH:mm:ss.fff") + " tick error " + ex.GetType().Name + ": " + ex.Message + "\n");
+                    }
+                    catch { }
+                }
                 // 空闲降频：连续一段时间没有变化就慢下来，一有变化立刻回到设定帧率
                 int quietMs = (int)(DateTime.Now - _lastChangeAt).TotalMilliseconds;
                 double fps = quietMs >= _watchIdleAfterMs ? Math.Min(_watchFps, _watchIdleFps) : _watchFps;
                 int interval = (int)Math.Max(100, 1000.0 / fps);
                 for (int slept = 0; slept < interval && _watchRun; slept += 50) Thread.Sleep(50);
             }
+        }
+
+            catch { }
         }
 
         private void WatchTick()
