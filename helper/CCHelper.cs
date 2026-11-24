@@ -9,6 +9,7 @@ using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Runtime.ExceptionServices;
 using System.Text;
 using System.Threading;
 using System.Web.Script.Serialization;
@@ -741,10 +742,10 @@ namespace ComputerControl
             DoubleBuffered = true;
             Font = new Font("Microsoft YaHei UI", 9f);
 
-            _status = MakeText("待机", Color.White, ContentAlignment.MiddleLeft);
+            _status = MakeText("待机", Color.White, ContentAlignment.MiddleLeft, true);
             _status.Font = new Font("Microsoft YaHei UI", 9.5f, FontStyle.Bold);
             _status.AutoEllipsis = true;
-            _focus = MakeText("", Color.FromArgb(175, 185, 200), ContentAlignment.MiddleLeft);
+            _focus = MakeText("", Color.FromArgb(175, 185, 200), ContentAlignment.MiddleLeft, true);
             _focus.Font = new Font("Microsoft YaHei UI", 8.5f);
             _focus.AutoEllipsis = true;
             _stop = MakeText("结束", Color.FromArgb(255, 128, 128), ContentAlignment.MiddleCenter);
@@ -801,6 +802,12 @@ namespace ComputerControl
             _close = MakeText("×", Color.FromArgb(170, 180, 195), ContentAlignment.MiddleCenter);
             _close.Font = new Font("Segoe UI", 12f, FontStyle.Bold);
             _close.Cursor = Cursors.Hand;
+
+            _hit.Add(_stop);
+            _hit.Add(_pause);
+            _hit.Add(_drawer);
+            _hit.Add(_lock);
+            _hit.Add(_close);
 
             // 左右两条拖动条：开锁时可拖动调宽，中心对称
             _gripLeft = MakeGrip();
@@ -915,9 +922,9 @@ namespace ComputerControl
             _previewTimer.Start();
         }
 
-        private Label MakeText(string text, Color color, ContentAlignment align)
+        private Label MakeText(string text, Color color, ContentAlignment align, bool passthrough = false)
         {
-            Label label = new Label();
+            Label label = passthrough ? (Label)new PassThroughLabel() : new Label();
             label.Text = text;
             label.ForeColor = color;
             // 用胶囊同色而不是透明：透明 Label 在分层不透明度下会在边缘露出一条接缝
@@ -1379,7 +1386,47 @@ namespace ComputerControl
             grip.MouseMove += ResizeMove;
             grip.MouseUp += ResizeUp;
             Controls.Add(grip);
+            _hit.Add(grip);
             return grip;
+        }
+
+        // 观看/控制时，胶囊的空白和文字区域不吞点击：只有这些控件真正接收鼠标。
+        // 文字层不吃点击：点穿到下面的游戏/窗口，免得胶囊挡住操作。
+        private class PassThroughLabel : Label
+        {
+            protected override void WndProc(ref Message m)
+            {
+                if (m.Msg == 0x0084)
+                {
+                    m.Result = new IntPtr(-1); // HTTRANSPARENT
+                    return;
+                }
+                base.WndProc(ref m);
+            }
+        }
+
+        private readonly List<Control> _hit = new List<Control>();
+
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == 0x0084 && !_drawerOpen) // WM_NCHITTEST
+            {
+                int lp = m.LParam.ToInt32();
+                Point screen = new Point((short)(lp & 0xFFFF), (short)((lp >> 16) & 0xFFFF));
+                Point client = PointToClient(screen);
+                bool hit = false;
+                foreach (Control control in _hit)
+                {
+                    if (control == null || !control.Visible) continue;
+                    if (control.Bounds.Contains(client)) { hit = true; break; }
+                }
+                if (!hit)
+                {
+                    m.Result = new IntPtr(-1); // HTTRANSPARENT：点穿到下面的窗口
+                    return;
+                }
+            }
+            base.WndProc(ref m);
         }
 
         private void ResizeDown(object sender, MouseEventArgs e)
@@ -3325,8 +3372,52 @@ namespace ComputerControl
     {
         private static void Main(string[] rawArgs)
         {
+            AppDomain.CurrentDomain.FirstChanceException += delegate(object sender, FirstChanceExceptionEventArgs e)
+            {
+                if (e.Exception is NullReferenceException)
+                {
+                    try
+                    {
+                        string path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "cch-crash.log");
+                        Exception ex = e.Exception;
+                        string stack = "?";
+                        try { stack = ex.StackTrace ?? "(no stack)"; } catch { }
+                        System.IO.File.AppendAllText(path, string.Format("{0} [FirstChance] {1}\n{2}\n\n", DateTime.Now.ToString("HH:mm:ss.fff"), ex.GetType().FullName, stack));
+                    }
+                    catch { }
+                }
+            };
+            AppDomain.CurrentDomain.UnhandledException += delegate(object sender, UnhandledExceptionEventArgs e)
+            {
+                CrashLog("AppDomain", e.ExceptionObject);
+            };
+            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+            Application.ThreadException += delegate(object sender, ThreadExceptionEventArgs e)
+            {
+                CrashLog("UIThread", e.Exception);
+            };
             Server server = new Server();
             server.Run();
+        }
+
+        private static void CrashLog(string where, object error)
+        {
+            try
+            {
+                string path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "cch-crash.log");
+                string type = "-";
+                string stack = "-";
+                System.Exception ex = error as System.Exception;
+                if (ex != null)
+                {
+                    try { type = ex.GetType().FullName; } catch { }
+                    try { stack = ex.StackTrace ?? "(no stack)"; } catch { }
+                }
+                string text = string.Format("{0} [{1}] {2}\n{3}\n\n", DateTime.Now.ToString("HH:mm:ss.fff"), where, type, stack);
+                System.IO.File.AppendAllText(path, text);
+                Console.Error.WriteLine("CRASH " + where + ": " + type);
+            }
+            catch { }
         }
     }
 }
