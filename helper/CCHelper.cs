@@ -188,9 +188,11 @@ namespace ComputerControl
         private static readonly List<KeyValuePair<int, int>> _shake = new List<KeyValuePair<int, int>>();
         private static int _shakeLastRaiseMs;
 
-        /** 左右来回甩鼠标：1 秒内方向反转 ≥4 次且跨度 ≥120px，就发一次暂停事件。 */
+        /** 左右来回甩鼠标：1 秒内反转 ≥4 次，且左、右两个方向各自甩开 ≥120px，才发暂停事件。
+         *  只朝一边幅度大、回程很小（半甩）不算，避免误触。 */
         private static void FeedShake(int x, int t)
         {
+            const int MinAmplitude = 120;
             _shake.Add(new KeyValuePair<int, int>(x, t));
             while (_shake.Count > 0 && t - _shake[0].Value > 1000) _shake.RemoveAt(0);
             if (_shake.Count < 6) return;
@@ -198,16 +200,29 @@ namespace ComputerControl
 
             int reversals = 0;
             int dir = 0;
-            int minX = x, maxX = x;
+            int maxRight = 0, maxLeft = 0;
+            int runStart = _shake[0].Key;
+            int prevX = runStart;
             for (int i = 1; i < _shake.Count; i++)
             {
-                int dx = _shake[i].Key - _shake[i - 1].Key;
-                if (dx < -6) { if (dir > 0) reversals++; dir = -1; }
-                else if (dx > 6) { if (dir < 0) reversals++; dir = 1; }
-                if (_shake[i].Key < minX) minX = _shake[i].Key;
-                if (_shake[i].Key > maxX) maxX = _shake[i].Key;
+                int curX = _shake[i].Key;
+                int dx = curX - prevX;
+                int newDir = dx < -6 ? -1 : (dx > 6 ? 1 : 0);
+                if (newDir != 0 && newDir != dir)
+                {
+                    int amplitude = Math.Abs(prevX - runStart);
+                    if (dir > 0 && amplitude > maxRight) maxRight = amplitude;
+                    else if (dir < 0 && amplitude > maxLeft) maxLeft = amplitude;
+                    if (dir != 0) reversals++;
+                    dir = newDir;
+                    runStart = prevX;
+                }
+                prevX = curX;
             }
-            if (reversals >= 4 && maxX - minX >= 120)
+            if (dir > 0) maxRight = Math.Max(maxRight, Math.Abs(prevX - runStart));
+            else if (dir < 0) maxLeft = Math.Max(maxLeft, Math.Abs(prevX - runStart));
+
+            if (reversals >= 4 && maxLeft >= MinAmplitude && maxRight >= MinAmplitude)
             {
                 _shakeLastRaiseMs = t;
                 _shake.Clear();
@@ -576,6 +591,18 @@ namespace ComputerControl
                 {
                     try
                     {
+                        // 悬浮岛线程自己的消息循环要有兜底：回调里抛异常会被系统当成
+                        // 0xC000041D 直接终止整个进程，托管层拦不住。
+                        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+                        Application.ThreadException += delegate(object s, ThreadExceptionEventArgs e)
+                        {
+                            try
+                            {
+                                string path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "cch-crash.log");
+                                System.IO.File.AppendAllText(path, DateTime.Now.ToString("HH:mm:ss.fff") + " [OverlayUI] " + e.Exception.GetType().FullName + "\n" + e.Exception.StackTrace + "\n\n");
+                            }
+                            catch { }
+                        };
                         Application.EnableVisualStyles();
                         _form = new OverlayForm();
                         IntPtr handle = _form.Handle;
@@ -1691,16 +1718,48 @@ namespace ComputerControl
                 Dictionary<string, object> args = GetDict(req, "args");
                 try
                 {
+                    Trace("> " + cmd);
+                    Stopwatch sw = Stopwatch.StartNew();
                     object result = Dispatch(cmd, args);
+                    sw.Stop();
+                    Trace("< " + cmd + " " + sw.ElapsedMilliseconds + "ms");
                     Emit(id, true, result, null);
                 }
                 catch (Exception ex)
                 {
+                    Trace("! " + cmd + " " + ex.GetType().Name + ": " + ex.Message);
                     Emit(id, false, null, cmd + "：" + ex.Message);
                 }
             }
             StopWatch();
             InputLog.Uninstall();
+        }
+
+        [DllImport("user32.dll")] private static extern uint GetGuiResources(IntPtr hProcess, uint flags);
+
+        private static uint GuiResources()
+        {
+            try { return GetGuiResources(Process.GetCurrentProcess().Handle, 0); } catch { return 0; }
+        }
+
+        private static readonly object TraceSync = new object();
+
+        /** 崩溃排查用：只记命令和阶段，崩溃后看最后几行就知道死在哪。 */
+        private static void Trace(string text)
+        {
+            try
+            {
+                string path = Path.Combine(Path.GetTempPath(), "cch-trace.log");
+                lock (TraceSync)
+                {
+                    if (File.Exists(path))
+                    {
+                        try { if (new FileInfo(path).Length > 2 * 1024 * 1024) File.Delete(path); } catch { }
+                    }
+                    File.AppendAllText(path, DateTime.Now.ToString("HH:mm:ss.fff") + " " + text + "\n");
+                }
+            }
+            catch { }
         }
 
         private void Emit(object id, bool ok, object result, string error)
@@ -1944,6 +2003,7 @@ namespace ComputerControl
 
             using (Bitmap bmp = Capture(region))
             {
+                Trace("shot cap " + bmp.Width + "x" + bmp.Height + " gdi=" + GuiResources());
                 int origW = bmp.Width;
                 if (grid || hasPoint)
                 {
@@ -1993,7 +2053,9 @@ namespace ComputerControl
 
                 int outW = output.Width;
                 int outH = output.Height;
+                Trace("shot save begin");
                 SaveJpeg(output, path, 82);
+                Trace("shot save ok gdi=" + GuiResources());
                 if (ownsOutput) output.Dispose();
 
                 Dictionary<string, object> res = new Dictionary<string, object>();
@@ -2609,10 +2671,12 @@ namespace ComputerControl
 
             Dictionary<string, object> element = null;
             string error = null;
+            bool skipUia = IsEmulator(root);
             Thread worker = new Thread(delegate()
             {
                 try
                 {
+                    if (skipUia) return;
                     AutomationElement el = AutomationElement.FromPoint(new System.Windows.Point(x, y));
                     if (el == null) return;
                     Dictionary<string, object> e = new Dictionary<string, object>();
@@ -2642,6 +2706,20 @@ namespace ComputerControl
             return res;
         }
 
+        /** 模拟器/游戏窗口的 UIA 树不可靠，查询还可能把 helper 拖崩，直接跳过。 */
+        private static bool IsEmulator(IntPtr hwnd)
+        {
+            try
+            {
+                if (hwnd == IntPtr.Zero) return false;
+                string exe = InputLog.ExeOf(hwnd) ?? "";
+                return exe.IndexOf("MuMu", StringComparison.OrdinalIgnoreCase) >= 0
+                    || exe.IndexOf("NxDevice", StringComparison.OrdinalIgnoreCase) >= 0
+                    || exe.IndexOf("MuMuPlayer", StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+            catch { return false; }
+        }
+
         private object Elements(Dictionary<string, object> a)
         {
             IntPtr hwnd = new IntPtr(Int(a, "hwnd", 0));
@@ -2651,7 +2729,11 @@ namespace ComputerControl
             string error = null;
             Thread worker = new Thread(delegate()
             {
-                try { list = CollectElements(hwnd, max, maxDepth); }
+                try
+                {
+                    if (IsEmulator(hwnd)) list = new List<Dictionary<string, object>>();
+                    else list = CollectElements(hwnd, max, maxDepth);
+                }
                 catch (Exception ex) { error = ex.Message; }
             });
             worker.IsBackground = true;
