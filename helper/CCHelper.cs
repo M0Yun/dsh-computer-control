@@ -2882,9 +2882,6 @@ namespace ComputerControl
             }
         }
 
-            catch { }
-        }
-
         private void WatchTick()
         {
             Rectangle vs = VirtualScreen();
